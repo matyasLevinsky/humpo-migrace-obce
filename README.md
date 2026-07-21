@@ -124,3 +124,51 @@ za celé období 2022–2026 beze změny, ověřeno na vzorcích z 2022, 2023, 2
   `celkem` vzrostl z 25,2 % (březen 2022) na cca 26,3 % (2026) – s viditelnými
   drobnými poklesy vždy kolem dubna/května každého roku (pravděpodobně
   souvislost s ročním cyklem prodlužování dočasné ochrany, ne chyba dat).
+
+## Shiny appka (`shiny_app/`)
+Interaktivní vizualizace `humpo_obce_mesicni.csv`: mapa ČR (kruhové značky na
+centroidech obcí, velikost/barva podle počtu uprchlíků), slider pro výběr
+měsíce (2022-03 až aktuální), graf podílu Prahy na národním součtu v čase a
+žebříček 8 obcí s nejvyšším počtem pro vybraný měsíc. Zdroj dat a datum
+poslední aktualizace jsou vypsané přímo v postranním panelu appky.
+
+**Nasazení:** appka běží čistě v prohlížeči přes [shinylive](https://posit-dev.github.io/r-shinylive/)
+(R zkompilované do WebAssembly přes webR) – žádný live R server není potřeba.
+`.github/workflows/deploy-shinylive.yml` appku při každé změně v `shiny_app/`
+nebo `data/processed/humpo_obce_mesicni.csv` sestaví a nasadí na GitHub Pages
+(zdrojový repozitář zůstává privátní, výsledná statická stránka na Pages je
+ale veřejně dostupná komukoliv s odkazem – GitHub Pages jinak nefunguje).
+
+**Lokální vývoj:**
+
+    Rscript shiny_app/prepare_data.R      # z data/processed/*.csv sestaví kompaktní shiny_app/data/*.rds
+    Rscript shiny_app/run_local_test.R    # spustí appku na http://127.0.0.1:7861 (klasický Shiny, ne shinylive)
+
+Export do statické shinylive podoby (stejné, co dělá i CI):
+
+    Rscript export_shinylive.R            # vytvoří docs/ (gitignored, jen pro lokální test)
+    Rscript serve_docs.R                  # obslouží docs/ na http://127.0.0.1:7862
+
+### Na co si dát pozor (shinylive)
+- Balíčky pro webR (shiny, leaflet, dplyr, ggplot2, scales, readr, shinylive)
+  jsou dostupné jako předkompilované WASM binárky v `repo.r-wasm.org` –
+  ověřeno před implementací. Instalace balíčku ze zdrojáku ve webR možná
+  není, funguje jen to, co má hotovou WASM binárku.
+- `leaflet` má v Imports `sf`/`raster`, což do appky přitáhne celý
+  geoprostorový R stack (`sf`, `terra`, `sp`, `raster`, `s2`) – i když appka
+  žádný z nich přímo nepoužívá (jen `addCircleMarkers` na lon/lat). To je
+  hlavní důvod, proč exportovaná appka v `docs/` má přes 100 MB (z toho ~35 MB
+  je nutný základ webR/R runtime, ~62 MB balíčky, ~31 MB z toho je právě
+  nevyužitý geoprostorový stack). Pokud by velikost/rychlost načtení vadila,
+  jde nahradit leaflet mapu prostým ggplot2 bodovým grafem na stejných
+  centroidech – ušetřilo by to zhruba třetinu velikosti.
+- Prvotní vykreslení `renderPlot`/`leafletProxy` výstupů může ve webR (běží
+  citelně pomaleji než nativní R) selhat na "invalid width or height" resp.
+  "Couldn't find map with id ..." kvůli tomu, že kontejner v DOM ještě nemá
+  ustálenou velikost / widget ještě není na klientovi svázaný. Appka to řeší
+  vlastním mechanismem (`redraw()` v `app.R`) – několik vynucených překreslení
+  s rostoucím odstupem (500 ms až ~2,5 s) krátce po startu.
+- Centroidy obcí (`shiny_app/data/obec_centroids.csv`) se stahují zvlášť
+  přes `R/fetch_obec_centroids.R` (ArcGIS `returnCentroid=true&outSR=4326`) a
+  commitují se do repozitáře - hranice obcí se mění jen zřídka, není potřeba
+  přegenerovávat při každém běhu hlavního pipeline.
