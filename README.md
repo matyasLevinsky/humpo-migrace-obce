@@ -126,20 +126,33 @@ za celé období 2022–2026 beze změny, ověřeno na vzorcích z 2022, 2023, 2
   souvislost s ročním cyklem prodlužování dočasné ochrany, ne chyba dat).
 
 ## Shiny appka (`shiny_app/`)
-Interaktivní vizualizace `humpo_obce_mesicni.csv`: choropleth mapa ČR (každá
-obec vybarvená podle koncentrace uprchlíků = `celkem / populace obce * 100`,
-ne podle absolutního počtu) s tooltipem na hover (název obce + koncentrace
-pro vybraný měsíc), slider pro výběr měsíce (2022-03 až aktuální, s
-popiskem "měsíc rok" místo číselného indexu), graf koncentrace v čase podle
-5 kategorií obcí (Praha; Brno/Ostrava/Plzeň; krajská města 50–120 tis.;
-regionální centra 3–50 tis.; malé obce < 3 tis.) a žebříček 10 obcí s
-nejvyšším absolutním počtem pro vybraný měsíc. Zdroj dat a datum poslední
-aktualizace jsou vypsané přímo v postranním panelu appky.
+Interaktivní vizualizace `humpo_obce_mesicni.csv`:
+- **Choropleth mapa ČR** – každá obec vybarvená podle koncentrace uprchlíků
+  (`celkem / populace obce * 100`, ne podle absolutního počtu), s hranicemi
+  ORP a krajů překreslenými přes ni, tooltipem na hover (obec, kraj, ORP,
+  koncentrace pro vybraný měsíc) a brush-to-zoom (viz níže).
+- **Slider** pro výběr měsíce (2022-03 až aktuální) s popiskem "měsíc rok"
+  místo číselného indexu.
+- **Dva grafy vedle sebe**: nalevo koncentrace (uprchlíci/populace) podle
+  5 kategorií obcí v čase, napravo podíl každé kategorie na celkovém počtu
+  uprchlíků v ČR daný měsíc (součet přes všech 5 kategorií = 100 %).
+  Kategorie: Praha; Brno/Ostrava/Plzeň; krajská města 50–120 tis.;
+  regionální centra 3–50 tis.; malé obce < 3 tis.
+- **Graf věkové struktury** – podíl dětí a mladistvých (0–17), produktivního
+  věku (18–64) a seniorů (65+) na celkovém počtu uprchlíků v čase (hranice
+  0–17 odpovídá tomu, jak jsou HUMPO věkové kategorie skutečně rozdělené:
+  `cis_age_0_2/3_5/6_14/15_17` vs. `cis_age_18_64` vs. `cis_age_65_`).
+- **Žebříček 10 obcí** s nejvyšším absolutním počtem pro vybraný měsíc.
 
-Mapa je statický `ggplot2` obrázek (ne interaktivní widget) – zobrazuje vždy
-pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`), takže není možné
-přiblížit/oddálit ani odjet mimo území státu (žádný pan/zoom tam není vůbec
-k dispozici).
+Zdroj dat a datum poslední aktualizace jsou vypsané přímo v postranním
+panelu appky.
+
+Mapa je statický `ggplot2` obrázek (ne interaktivní widget jako leaflet), ale
+podporuje **brush-to-zoom**: tažením myši přes mapu se vybere podoblast a
+graf se překreslí na tento výřez; dvojklik vrátí zobrazení na celou ČR. Není
+možné vidět okolní státy ani vyjet mimo republiku – brush vždy vybírá jen
+podmnožinu aktuálně zobrazené oblasti, která sama od začátku nikdy
+nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`).
 
 **Nasazení:** appka běží čistě v prohlížeči přes [shinylive](https://posit-dev.github.io/r-shinylive/)
 (R zkompilované do WebAssembly přes webR) – žádný live R server není potřeba.
@@ -182,23 +195,33 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
   vnitřní stav slideru a rozbilo Shiny vlastní vazbu na change event
   (zjištěno při implementaci: `update()` přegeneruje vnitřní `<span>`, takže
   i "bezpečný" pozorovatel musí sledovat celý wrapper, ne konkrétní uzel).
-- Hranice obcí (`shiny_app/data/obec_hranice.rds`) se stahují a zjednodušují
-  přes `R/fetch_obec_polygons.R` a commitují se do repozitáře jako hotový
-  soubor - hranice obcí se mění jen zřídka, není potřeba přegenerovávat při
-  každém běhu hlavního pipeline. **Server-side generalizace ArcGIS
-  (`maxAllowableOffset`) byla zavrhnuta** - zjednodušuje každý polygon
-  nezávisle, takže mezi sousedícími obcemi vznikaly bílé mezery (jejich
-  společná hranice se po zjednodušení posunula jinak na každé straně).
-  Řešení: stáhne se plné rozlišení (1,34 mil. vrcholů, ~29 s) a zjednoduší
-  se topologicky přes `rmapshaper::ms_simplify(keep = 0.07, keep_shapes =
-  TRUE, sys = FALSE)` (V8 JS engine, ne systémový Node.js/mapshaper - žádná
-  externí závislost navíc), který sdílené vrcholy/hrany mezi sousedy
-  zachovává - výsledek je beze mezer (135 tis. vrcholů, 1,4 MB). `sf`/
-  `rmapshaper`/`sfheaders` se používají jen v tomto jednorázovém fetch
-  skriptu (spouští se lokálně/manuálně), ne v appce samotné ani v CI, takže
-  velikost nasazené appky neovlivňují. Zjednodušení nerozlišuje díry/
-  enklávy (každý prstenec geometrie je samostatný polygon) – u českých
-  obcí jde o zanedbatelnou odchylku.
+- **Zdroj hranic obcí/ORP/krajů: balíček `RCzechia`**, ne ruční stahování z
+  ArcGIS (původní řešení). `RCzechia::obce_polygony()` má přesné RUIAN kódy
+  (`KOD_OBEC`) – ověřeno před implementací: 6258/6258 (100 %) shoda s kódy
+  použitými v HUMPO/MV datech – a rovnou obsahuje i `KOD_ORP`/`NAZ_ORP`/
+  `KOD_KRAJ`/`NAZ_CZNUTS3` u každé obce, takže odpadá samostatný join na
+  kraj/ORP pro tooltip. `RCzechia::orp_polygony()` a `RCzechia::kraje()`
+  dodávají hranice ORP a krajů pro obrysové linie na mapě.
+- Hranice (`shiny_app/data/obec_hranice.rds`, `orp_hranice.rds`,
+  `kraj_hranice.rds`) i admin. příslušnost (`obec_admin.rds`) se stahují a
+  zjednodušují přes `R/fetch_obec_polygons.R` a commitují se do repozitáře
+  jako hotové soubory - hranice se mění jen zřídka, není potřeba
+  přegenerovávat při každém běhu hlavního pipeline. **Server-side
+  generalizace ArcGIS (`maxAllowableOffset`), použitá v úplně první verzi,
+  byla zavrhnuta** - zjednodušuje každý polygon nezávisle, takže mezi
+  sousedícími obcemi vznikaly bílé mezery (jejich společná hranice se po
+  zjednodušení posunula jinak na každé straně). Řešení: stáhne se plné
+  rozlišení (obce: 1,05 mil. vrcholů) a zjednoduší se topologicky přes
+  `rmapshaper::ms_simplify(keep_shapes = TRUE, sys = FALSE)` (V8 JS engine,
+  ne systémový Node.js/mapshaper - žádná externí závislost navíc), který
+  sdílené vrcholy/hrany mezi sousedy zachovává - výsledek je beze mezer
+  (obce: 114 tis. vrcholů/1,5 MB; ORP: 26 tis./0,27 MB; kraje: 14,5 tis./
+  0,17 MB). `sf`/`RCzechia`/`rmapshaper`/`sfheaders` se používají jen v
+  tomto jednorázovém fetch skriptu (spouští se lokálně/manuálně), ne v
+  appce samotné ani v CI, takže velikost nasazené appky neovlivňují.
+  Zjednodušení nerozlišuje díry/enklávy (každý prstenec geometrie je
+  samostatný polygon) – u českých obcí/ORP/krajů jde o zanedbatelnou
+  odchylku.
 - Populace pro obce s MOMC rozpadem (Praha, Brno, ...) se v
   `humpo_obce_latest.csv` nedá najít přímo (ten soubor má jen rozpad po
   městských částech) – `prepare_data.R` ji tam dopočítává součtem populace
@@ -209,7 +232,18 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
   předfiltr (`bbox_tbl`) + ruční point-in-polygon test (ray casting) nad
   stejnými lon/lat daty, která kreslí mapu - žádná nová závislost. Pozice
   tooltipu (CSS pixely) se bere z `input$mapa_hover$coords_css`.
-- Graf kategorií obcí agreguje koncentraci jako `sum(uprchlíci) /
-  sum(populace)` za celou kategorii a měsíc (ne průměr jednotlivých obecních
-  koncentrací) - dává tak skutečný "kolik % lidí v této skupině obcí jsou
-  uprchlíci", správně váženo podle velikosti obce.
+- **Zoom mapy** se řeší nativním Shiny `brushOpts`/`dblclick` (oficiálně
+  zdokumentovaný postup "zooming with brushing") – bez plotly/leaflet, tedy
+  bez dopadu na velikost appky. `input$mapa_brush` dává vybraný výřez rovnou
+  v datových souřadnicích (lon/lat), takže stačí uložit do
+  `reactiveValues` a použít jako nové `xlim`/`ylim` v `coord_fixed()`;
+  dvojklik vrací na `CR_XLIM`/`CR_YLIM`. Ověřeno přímo přes
+  `Shiny.setInputValue()` (simulace tažení myši přes syntetické DOM
+  události se ukázala nespolehlivá pro Shiny brush binding, přímý zápis
+  vstupní hodnoty ale spolehlivě ověří, že reaktivní logika funguje).
+- Grafy kategorií obcí agregují koncentraci/podíl jako `sum(uprchlíci) /
+  sum(populace)` resp. `sum(uprchlíci kategorie) / sum(uprchlíci ČR)` za
+  celou kategorii a měsíc (ne průměr jednotlivých obecních hodnot) - dává
+  tak skutečné "kolik % lidí v této skupině obcí jsou uprchlíci" resp.
+  "jaký podíl všech uprchlíků v ČR na tuto skupinu připadá", správně váženo
+  podle velikosti obce.

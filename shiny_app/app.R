@@ -4,26 +4,31 @@
 #
 # Zdroje dat:
 #  - HUMPO (gis.humpo.cz), Ministerstvo vnitra CR / Arcdata Praha - zivy
-#    snapshot pro nejnovejsi mesic a hranice/populace obci
+#    snapshot pro nejnovejsi mesic a populaci obci
 #  - MV CR (mv.gov.cz), archiv statistik k valce na Ukrajine - historicke
 #    mesicni snapshoty brezen 2022 az kveten 2026
+#  - RCzechia - hranice obci/ORP/kraju a jejich administrativni prislusnost
+#    (viz R/fetch_obec_polygons.R)
 # Podrobna metodika: viz README.md a R/ ve zbytku tohoto repozitare.
 #
 # Mapa je staticky ggplot2 choropleth (ne leaflet) - zamerne: (a) nepotahuje
 # tim cely geoprostorovy R stack (sf/terra/sp/raster/s2), ktery leaflet
-# vyzaduje jen kvuli Imports, a (b) staticky obrazek nema zadny interaktivni
-# pan/zoom, takze se nikdy nejde podivat mimo pevne dany vyrez CR. Tooltip na
-# hover se resi rucne (bez plotly/leaflet) pres Shiny hoverOpts + bounding-box
-# predfiltr + point-in-polygon nad stejnymi lon/lat daty jako kresli mapu.
+# vyzaduje jen kvuli Imports, a (b) zoom je resen brush-to-zoom (Shiny
+# brushOpts + reaktivni xlim/ylim), ne interaktivnim widgetem - takze nejde
+# odjet mimo pevne dany vyrez CR (brush vybira jen podmnozinu aktualne
+# zobrazene oblasti, ktera uz od zacatku nikdy nepresahuje CR).
 
 library(shiny)
 library(dplyr)
 library(ggplot2)
 library(scales)
 
-lookup  <- readRDS("data/obec_lookup.rds")
-panel   <- readRDS("data/mesicni_panel.rds")
-hranice <- readRDS("data/obec_hranice.rds")
+lookup      <- readRDS("data/obec_lookup.rds")
+panel       <- readRDS("data/mesicni_panel.rds")
+hranice     <- readRDS("data/obec_hranice.rds")
+orp_hranice <- readRDS("data/orp_hranice.rds")
+kraj_hranice <- readRDS("data/kraj_hranice.rds")
+vekova_struktura <- readRDS("data/vekova_struktura.rds")
 
 mesice <- sort(unique(panel$cilovy_mesic))
 mesic_datum <- as.Date(mesice)
@@ -37,7 +42,7 @@ posledni_zdroj <- panel |> filter(cilovy_mesic == max(cilovy_mesic)) |> pull(zdr
 posledni_label <- mesic_label[length(mesic_label)]
 datum_generovani <- format(Sys.Date(), "%d. %m. %Y")
 
-# --- kategorie obci pro souhrnny trend graf ---------------------------------
+# --- kategorie obci pro souhrnne trendy grafy -------------------------------
 KOD_PRAHA <- "554782"
 KOD_BOP   <- c("582786", "554821", "554791")  # Brno, Ostrava, Plzen
 PORADI_KATEGORII <- c("Praha", "Brno, Ostrava, Plzeň", "Krajská města (50–120 tis.)",
@@ -52,11 +57,36 @@ lookup <- lookup |>
     TRUE                  ~ "Malé obce (< 3 tis.)"
   ))
 
+# nalevo: relativni koncentrace (uprchlici / populace kategorie)
 kategorie_trend <- panel |>
   inner_join(lookup |> select(kod_obce, populace, kategorie), by = "kod_obce") |>
   summarise(koncentrace_kat = sum(celkem) / sum(populace) * 100, .by = c(cilovy_mesic, kategorie)) |>
   mutate(datum = as.Date(cilovy_mesic),
          kategorie = factor(kategorie, levels = PORADI_KATEGORII))
+
+# napravo: podil kategorie na celkovem poctu uprchliku v CR (soucet = 100 %)
+kategorie_podil <- panel |>
+  inner_join(lookup |> select(kod_obce, kategorie), by = "kod_obce") |>
+  summarise(celkem_kat = sum(celkem), .by = c(cilovy_mesic, kategorie)) |>
+  mutate(celkem_cr = sum(celkem_kat), .by = cilovy_mesic) |>
+  mutate(podil_pct = celkem_kat / celkem_cr * 100,
+         datum = as.Date(cilovy_mesic),
+         kategorie = factor(kategorie, levels = PORADI_KATEGORII))
+
+BARVY_KATEGORII <- setNames(RColorBrewer::brewer.pal(5, "Set1"), PORADI_KATEGORII)
+
+# --- vekova struktura v case (narodni agregat) ------------------------------
+celkem_mesic_vek <- vekova_struktura |> transmute(cilovy_mesic, celkem = deti + produktivni + seniori)
+PORADI_VEKU <- c("Děti a mladiství (0–17)", "Produktivní věk (18–64)", "Senioři (65+)")
+vekova_dlouhy <- bind_rows(
+  vekova_struktura |> transmute(cilovy_mesic, skupina_veku = "Děti a mladiství (0–17)", pocet = deti),
+  vekova_struktura |> transmute(cilovy_mesic, skupina_veku = "Produktivní věk (18–64)", pocet = produktivni),
+  vekova_struktura |> transmute(cilovy_mesic, skupina_veku = "Senioři (65+)", pocet = seniori)
+) |>
+  inner_join(celkem_mesic_vek, by = "cilovy_mesic") |>
+  mutate(podil_pct = pocet / celkem * 100,
+         datum = as.Date(cilovy_mesic),
+         skupina_veku = factor(skupina_veku, levels = PORADI_VEKU))
 
 # --- pomocna data pro hover tooltip (bbox predfiltr + point-in-polygon) -----
 bbox_tbl <- hranice |>
@@ -99,6 +129,7 @@ ui <- fluidPage(
   tags$head(tags$style(HTML("
     body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
     .zdroj-info { font-size: 12px; color: #666; margin-top: 10px; }
+    .mapa-hint { font-size: 12px; color: #888; margin-top: 4px; }
   "))),
   tags$script(HTML(sprintf('
     (function() {
@@ -121,9 +152,6 @@ ui <- fluidPage(
         wrapper = container && container.parentElement;
         if (wrapper && wrapper.querySelector(".irs-single")) {
           applyLabel();
-          // subtree:true - ion.rangeSlider muze pri update() prekreslit cely
-          // vnitrni <span>, ne jen zmenit text; sledujeme proto cely wrapper
-          // a .irs-single pri kazde zmene znovu dohledame, ne pevny odkaz.
           new MutationObserver(applyLabel)
             .observe(wrapper, {childList: true, characterData: true, subtree: true});
         } else {
@@ -149,7 +177,8 @@ ui <- fluidPage(
         tags$b("Zdroj dat:"), tags$br(),
         "HUMPO (", tags$a(href = "https://gis.humpo.cz", "gis.humpo.cz"),
         "), Ministerstvo vnitra ČR / Arcdata Praha - živý snapshot.", tags$br(),
-        "MV ČR (mv.gov.cz), archiv statistik k válce na Ukrajině - historická data 03/2022-05/2026.",
+        "MV ČR (mv.gov.cz), archiv statistik k válce na Ukrajině - historická data 03/2022-05/2026.", tags$br(),
+        "RCzechia - hranice obcí/ORP/krajů.",
         tags$br(), tags$br(),
         tags$b("Poslední měsíc v datech:"), " ", posledni_label,
         " (zdroj: ", posledni_zdroj, ")", tags$br(),
@@ -161,11 +190,19 @@ ui <- fluidPage(
       div(
         style = "position: relative;",
         plotOutput("mapa", height = 560,
-                   hover = hoverOpts("mapa_hover", delay = 100, delayType = "throttle", nullOutside = TRUE)),
+                   hover = hoverOpts("mapa_hover", delay = 100, delayType = "throttle", nullOutside = TRUE),
+                   brush = brushOpts("mapa_brush", resetOnNew = TRUE),
+                   dblclick = "mapa_dblclick"),
         uiOutput("mapa_tooltip")
       ),
+      div(class = "mapa-hint", "Tip: tažením myši přiblížíte vybranou oblast (jen v rámci ČR), dvojklikem se vrátíte na celou republiku."),
       tags$hr(),
-      plotOutput("trend_kategorie", height = 320)
+      fluidRow(
+        column(6, plotOutput("trend_koncentrace", height = 300)),
+        column(6, plotOutput("trend_podil", height = 300))
+      ),
+      tags$hr(),
+      plotOutput("trend_vek", height = 280)
     )
   )
 )
@@ -202,11 +239,29 @@ server <- function(input, output, session) {
     hranice |> left_join(konc, by = "kod_obce")
   })
 
+  # --- zoom mapy: brush vybere podoblast (vzdy podmnozina aktualniho
+  # vyrezu, ktery od zacatku nikdy nepresahuje CR), dvojklik vraci na cely
+  # stat. Zadny pan/zoom mimo CR neni mozny.
+  mapa_rozsah <- reactiveValues(x = CR_XLIM, y = CR_YLIM)
+
+  observeEvent(input$mapa_brush, {
+    b <- input$mapa_brush
+    mapa_rozsah$x <- c(b$xmin, b$xmax)
+    mapa_rozsah$y <- c(b$ymin, b$ymax)
+  })
+
+  observeEvent(input$mapa_dblclick, {
+    mapa_rozsah$x <- CR_XLIM
+    mapa_rozsah$y <- CR_YLIM
+  })
+
   output$mapa <- renderPlot({
     redraw()
-    ggplot(mapa_data(), aes(lon, lat, group = skupina, fill = koncentrace_pct)) +
-      geom_polygon(color = NA) +
-      coord_fixed(ratio = POMER_STRAN, xlim = CR_XLIM, ylim = CR_YLIM, expand = FALSE) +
+    ggplot() +
+      geom_polygon(data = mapa_data(), aes(lon, lat, group = skupina, fill = koncentrace_pct), color = NA) +
+      geom_polygon(data = orp_hranice, aes(lon, lat, group = skupina), fill = NA, color = "grey45", linewidth = 0.25) +
+      geom_polygon(data = kraj_hranice, aes(lon, lat, group = skupina), fill = NA, color = "grey10", linewidth = 0.7) +
+      coord_fixed(ratio = POMER_STRAN, xlim = mapa_rozsah$x, ylim = mapa_rozsah$y, expand = FALSE) +
       scale_fill_viridis_c(name = "Koncentrace\nuprchlíků (%)", option = "inferno",
                             limits = c(0, 10), oob = scales::squish, na.value = "grey85") +
       labs(title = paste("Koncentrace uprchlíků podle obcí –", mesic_label[input$mesic_idx])) +
@@ -231,6 +286,8 @@ server <- function(input, output, session) {
         "pointer-events:none; z-index:1000; white-space:nowrap;"
       ),
       tags$b(radek$obec[1]), tags$br(),
+      sprintf("Kraj: %s", radek$kraj_nazev[1]), tags$br(),
+      sprintf("ORP: %s", radek$orp_nazev[1]), tags$br(),
       sprintf("Koncentrace: %.2f %%", radek$koncentrace_pct[1])
     )
   })
@@ -241,15 +298,43 @@ server <- function(input, output, session) {
       transmute(Obec = obec, Počet = format(celkem, big.mark = " "))
   }, striped = TRUE, spacing = "xs")
 
-  output$trend_kategorie <- renderPlot({
+  output$trend_koncentrace <- renderPlot({
     redraw()
     ggplot(kategorie_trend, aes(datum, koncentrace_kat, color = kategorie)) +
       geom_line(linewidth = 1) +
       geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
                  linetype = "dashed", color = "grey40") +
       scale_y_continuous(labels = function(x) paste0(x, " %")) +
-      scale_color_brewer(palette = "Set1") +
-      labs(title = "Koncentrace uprchlíků podle typu obce v čase",
+      scale_color_manual(values = BARVY_KATEGORII) +
+      labs(title = "Koncentrace (uprchlíci / populace kategorie)",
+           x = NULL, y = NULL, color = NULL) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "bottom")
+  })
+
+  output$trend_podil <- renderPlot({
+    redraw()
+    ggplot(kategorie_podil, aes(datum, podil_pct, color = kategorie)) +
+      geom_line(linewidth = 1) +
+      geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
+                 linetype = "dashed", color = "grey40") +
+      scale_y_continuous(labels = function(x) paste0(x, " %")) +
+      scale_color_manual(values = BARVY_KATEGORII) +
+      labs(title = "Podíl na celkovém počtu uprchlíků v ČR",
+           x = NULL, y = NULL, color = NULL) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "bottom")
+  })
+
+  output$trend_vek <- renderPlot({
+    redraw()
+    ggplot(vekova_dlouhy, aes(datum, podil_pct, color = skupina_veku)) +
+      geom_line(linewidth = 1) +
+      geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
+                 linetype = "dashed", color = "grey40") +
+      scale_y_continuous(labels = function(x) paste0(x, " %")) +
+      scale_color_manual(values = c("#377eb8", "#4daf4a", "#984ea3")) +
+      labs(title = "Věková struktura uprchlíků v ČR v čase",
            x = NULL, y = NULL, color = NULL) +
       theme_minimal(base_size = 12) +
       theme(legend.position = "bottom")
