@@ -1,0 +1,7 @@
+.Rhistory
+.RData
+.Rproj.user/
+.Ruserdata
+data/raw/
+.claude/worktrees/
+.claude/settings.local.json
