@@ -11,12 +11,12 @@
 #    (viz R/fetch_obec_polygons.R)
 # Podrobna metodika: viz README.md a R/ ve zbytku tohoto repozitare.
 #
-# Mapa je staticky ggplot2 choropleth (ne leaflet) - zamerne: (a) nepotahuje
-# tim cely geoprostorovy R stack (sf/terra/sp/raster/s2), ktery leaflet
-# vyzaduje jen kvuli Imports, a (b) zoom je resen brush-to-zoom (Shiny
-# brushOpts + reaktivni xlim/ylim), ne interaktivnim widgetem - takze nejde
-# odjet mimo pevne dany vyrez CR (brush vybira jen podmnozinu aktualne
-# zobrazene oblasti, ktera uz od zacatku nikdy nepresahuje CR).
+# Mapa i vsechny 3 casove grafy jsou staticke ggplot2 obrazky (ne
+# leaflet/plotly) - zamerne, aby appka nepotahovala tezke geoprostorove/JS
+# zavislosti. Zoom (mapa i grafy) je resen brush-to-zoom (Shiny brushOpts +
+# reaktivni xlim/ylim) a hover tooltipy rucnim point-in-polygon (mapa) resp.
+# shiny::nearPoints() (grafy) - zadna nova zavislost, zadny dopad na
+# velikost appky.
 
 library(shiny)
 library(dplyr)
@@ -87,8 +87,9 @@ vekova_dlouhy <- bind_rows(
   mutate(podil_pct = pocet / celkem * 100,
          datum = as.Date(cilovy_mesic),
          skupina_veku = factor(skupina_veku, levels = PORADI_VEKU))
+BARVY_VEKU <- setNames(c("#377eb8", "#4daf4a", "#984ea3"), PORADI_VEKU)
 
-# --- pomocna data pro hover tooltip (bbox predfiltr + point-in-polygon) -----
+# --- pomocna data pro hover tooltip na mape (bbox predfiltr + point-in-polygon) --
 bbox_tbl <- hranice |>
   summarise(xmin = min(lon), xmax = max(lon), ymin = min(lat), ymax = max(lat),
             .by = c(kod_obce, skupina))
@@ -125,11 +126,60 @@ CR_XLIM <- c(12.0, 19.0)
 CR_YLIM <- c(48.5, 51.2)
 POMER_STRAN <- 1 / cos(49.8 * pi / 180)
 
+#' Rucni ekvivalent shiny::nearPoints() pro hover na casovych grafech.
+#'
+#' Puvodne pouzity shiny::nearPoints() spolehlive fungoval v klasickem R,
+#' ale ve webR/shinylive tise nenachazel zadnou shodu, i kdyz hover udalost
+#' (x/y/domain/range) prichazela s naprosto rozumnymi hodnotami - overeno
+#' primym ctenim input$..._hover na serveru. Mista dohledavani presne
+#' priciny (pravdepodobne rozdil v tom, jak nearPoints interne zpracovava
+#' Date sloupce/mapping v teto sestave balicku) je rucni prepocet
+#' data -> pixely (stejnou linearni transformaci, jakou pouziva Shiny -
+#' viz hover$domain/hover$range) spolehlivejsi a snaz kontrolovatelny -
+#' stejny pristup uz pouzivame pro point-in-polygon test na mape.
+najdi_nejblizsi_bod <- function(data, xvar, yvar, hover, threshold_px = 15) {
+  prazdny <- data[0, ]
+  if (is.null(hover) || is.null(hover$domain) || is.null(hover$range) || is.null(hover$coords_css)) return(prazdny)
+  d <- hover$domain; r <- hover$range
+  x_data <- as.numeric(data[[xvar]])
+  y_data <- as.numeric(data[[yvar]])
+  px <- r$left + (x_data - d$left) / (d$right - d$left) * (r$right - r$left)
+  py <- r$bottom + (y_data - d$bottom) / (d$top - d$bottom) * (r$top - r$bottom)
+  vzdalenost <- sqrt((px - hover$coords_css$x)^2 + (py - hover$coords_css$y)^2)
+  i <- which.min(vzdalenost)
+  if (length(i) == 0 || vzdalenost[i] > threshold_px) return(prazdny)
+  data[i, ]
+}
+
+# vraci styl pro plovouci tooltip div, pozicovany podle kurzoru (CSS pixely)
+tooltip_style <- function(css_x, css_y) {
+  paste0(
+    "position:absolute; left:", css_x + 12, "px; top:", css_y + 12, "px; ",
+    "background:white; border:1px solid #999; border-radius:4px; ",
+    "padding:4px 10px; font-size:13px; box-shadow:0 1px 4px rgba(0,0,0,0.25); ",
+    "pointer-events:none; z-index:1000; white-space:nowrap;"
+  )
+}
+
+# UI blok pro jeden zoomovatelny/hoverovatelny casovy graf - brush jen na ose
+# X (casova osa), dvojklik resetuje. Pouzito 3x (koncentrace/podil/vek).
+zoom_chart_ui <- function(id, height) {
+  div(
+    style = "position: relative;",
+    plotOutput(id, height = height,
+               hover = hoverOpts(paste0(id, "_hover"), delay = 100, delayType = "throttle", nullOutside = TRUE),
+               brush = brushOpts(paste0(id, "_brush"), direction = "x", resetOnNew = TRUE),
+               dblclick = paste0(id, "_dblclick")),
+    uiOutput(paste0(id, "_tooltip"))
+  )
+}
+
 ui <- fluidPage(
   tags$head(tags$style(HTML("
     body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
     .zdroj-info { font-size: 12px; color: #666; margin-top: 10px; }
-    .mapa-hint { font-size: 12px; color: #888; margin-top: 4px; }
+    .graf-hint { font-size: 12px; color: #888; margin: 4px 0 10px 0; }
+    .graf-hint b { color: #555; }
   "))),
   tags$script(HTML(sprintf('
     (function() {
@@ -187,6 +237,7 @@ ui <- fluidPage(
     ),
     mainPanel(
       width = 9,
+      div(class = "graf-hint", "🔍 ", tags$b("Tip:"), " tažením myši přes mapu přiblížíte vybranou oblast (jen v rámci ČR), dvojklikem se vrátíte na celou republiku."),
       div(
         style = "position: relative;",
         plotOutput("mapa", height = 560,
@@ -195,14 +246,14 @@ ui <- fluidPage(
                    dblclick = "mapa_dblclick"),
         uiOutput("mapa_tooltip")
       ),
-      div(class = "mapa-hint", "Tip: tažením myši přiblížíte vybranou oblast (jen v rámci ČR), dvojklikem se vrátíte na celou republiku."),
       tags$hr(),
+      div(class = "graf-hint", "🔍 ", tags$b("Tip:"), " tažením podél osy X přiblížíte časové období u grafů níže, dvojklikem resetujete."),
       fluidRow(
-        column(6, plotOutput("trend_koncentrace", height = 300)),
-        column(6, plotOutput("trend_podil", height = 300))
+        column(6, zoom_chart_ui("trend_koncentrace", 300)),
+        column(6, zoom_chart_ui("trend_podil", 300))
       ),
       tags$hr(),
-      plotOutput("trend_vek", height = 280)
+      zoom_chart_ui("trend_vek", 280)
     )
   )
 )
@@ -279,12 +330,7 @@ server <- function(input, output, session) {
     css_x <- if (!is.null(h$coords_css)) h$coords_css$x else 20
     css_y <- if (!is.null(h$coords_css)) h$coords_css$y else 20
     div(
-      style = paste0(
-        "position:absolute; left:", css_x + 12, "px; top:", css_y + 12, "px; ",
-        "background:white; border:1px solid #999; border-radius:4px; ",
-        "padding:4px 10px; font-size:13px; box-shadow:0 1px 4px rgba(0,0,0,0.25); ",
-        "pointer-events:none; z-index:1000; white-space:nowrap;"
-      ),
+      style = tooltip_style(css_x, css_y),
       tags$b(radek$obec[1]), tags$br(),
       sprintf("Kraj: %s", radek$kraj_nazev[1]), tags$br(),
       sprintf("ORP: %s", radek$orp_nazev[1]), tags$br(),
@@ -295,50 +341,68 @@ server <- function(input, output, session) {
   output$top10 <- renderTable({
     mesic_data() |>
       slice_head(n = 10) |>
-      transmute(Obec = obec, Počet = format(celkem, big.mark = " "))
+      transmute(Obec = obec,
+                Počet = format(celkem, big.mark = " "),
+                `Podíl ČR` = sprintf("%.1f %%", podil_narodni_pct),
+                `Prům. věk` = ifelse(is.na(prumerny_vek), "–", sprintf("%.0f", prumerny_vek)))
   }, striped = TRUE, spacing = "xs")
 
-  output$trend_koncentrace <- renderPlot({
-    redraw()
-    ggplot(kategorie_trend, aes(datum, koncentrace_kat, color = kategorie)) +
-      geom_line(linewidth = 1) +
-      geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
-                 linetype = "dashed", color = "grey40") +
-      scale_y_continuous(labels = function(x) paste0(x, " %")) +
-      scale_color_manual(values = BARVY_KATEGORII) +
-      labs(title = "Koncentrace (uprchlíci / populace kategorie)",
-           x = NULL, y = NULL, color = NULL) +
-      theme_minimal(base_size = 12) +
-      theme(legend.position = "bottom")
-  })
+  # --- spolecna registrace zoom+hover pro jeden z casovych grafu (brush jen
+  # na ose X, dvojklik resetuje; hover pres shiny::nearPoints najde
+  # nejblizsi datovy bod mezi vsemi krivkami grafu).
+  registruj_graf <- function(id, data, xvar, yvar, barva_var, paleta, nazev, jednotka = " %") {
+    rozsah <- reactiveValues(x = NULL)
 
-  output$trend_podil <- renderPlot({
-    redraw()
-    ggplot(kategorie_podil, aes(datum, podil_pct, color = kategorie)) +
-      geom_line(linewidth = 1) +
-      geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
-                 linetype = "dashed", color = "grey40") +
-      scale_y_continuous(labels = function(x) paste0(x, " %")) +
-      scale_color_manual(values = BARVY_KATEGORII) +
-      labs(title = "Podíl na celkovém počtu uprchlíků v ČR",
-           x = NULL, y = NULL, color = NULL) +
-      theme_minimal(base_size = 12) +
-      theme(legend.position = "bottom")
-  })
+    observeEvent(input[[paste0(id, "_brush")]], {
+      b <- input[[paste0(id, "_brush")]]
+      # b$xmin/xmax muzou prijit jako holy numeric misto Date (zavisi na
+      # tom, jak presne Shiny odvodi typ z brush udalosti) - as.Date() na
+      # uz-Date objektu je no-op, takze tohle je bezpecne v obou pripadech.
+      # Bez toho coord_cartesian() padal na "transform_date() works with
+      # objects of class <Date> only".
+      rozsah$x <- as.Date(c(b$xmin, b$xmax), origin = "1970-01-01")
+    })
+    observeEvent(input[[paste0(id, "_dblclick")]], {
+      rozsah$x <- NULL
+    })
 
-  output$trend_vek <- renderPlot({
-    redraw()
-    ggplot(vekova_dlouhy, aes(datum, podil_pct, color = skupina_veku)) +
-      geom_line(linewidth = 1) +
-      geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
-                 linetype = "dashed", color = "grey40") +
-      scale_y_continuous(labels = function(x) paste0(x, " %")) +
-      scale_color_manual(values = c("#377eb8", "#4daf4a", "#984ea3")) +
-      labs(title = "Věková struktura uprchlíků v ČR v čase",
-           x = NULL, y = NULL, color = NULL) +
-      theme_minimal(base_size = 12) +
-      theme(legend.position = "bottom")
-  })
+    output[[id]] <- renderPlot({
+      redraw()
+      p <- ggplot(data, aes(.data[[xvar]], .data[[yvar]], color = .data[[barva_var]])) +
+        geom_line(linewidth = 1) +
+        geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
+                   linetype = "dashed", color = "grey40") +
+        scale_y_continuous(labels = function(x) paste0(x, jednotka)) +
+        scale_color_manual(values = paleta) +
+        labs(title = nazev, x = NULL, y = NULL, color = NULL) +
+        theme_minimal(base_size = 12) +
+        theme(legend.position = "bottom")
+      if (!is.null(rozsah$x)) p <- p + coord_cartesian(xlim = rozsah$x)
+      p
+    })
+
+    output[[paste0(id, "_tooltip")]] <- renderUI({
+      hov <- input[[paste0(id, "_hover")]]
+      req(hov)
+      bod <- najdi_nejblizsi_bod(data, xvar, yvar, hov)
+      if (nrow(bod) == 0) return(NULL)
+      css_x <- if (!is.null(hov$coords_css)) hov$coords_css$x else 20
+      css_y <- if (!is.null(hov$coords_css)) hov$coords_css$y else 20
+      div(
+        style = tooltip_style(css_x, css_y),
+        tags$b(as.character(bod[[barva_var]][1])), tags$br(),
+        format(bod[[xvar]][1], "%m/%Y"), ": ",
+        sprintf("%.2f%s", bod[[yvar]][1], jednotka)
+      )
+    })
+  }
+
+  registruj_graf("trend_koncentrace", kategorie_trend, "datum", "koncentrace_kat", "kategorie",
+                 BARVY_KATEGORII, "Koncentrace (uprchlíci / populace kategorie)")
+  registruj_graf("trend_podil", kategorie_podil, "datum", "podil_pct", "kategorie",
+                 BARVY_KATEGORII, "Podíl na celkovém počtu uprchlíků v ČR")
+  registruj_graf("trend_vek", vekova_dlouhy, "datum", "podil_pct", "skupina_veku",
+                 BARVY_VEKU, "Věková struktura uprchlíků v ČR v čase")
 }
 
 shinyApp(ui, server)

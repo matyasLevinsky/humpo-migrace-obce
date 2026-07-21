@@ -47,11 +47,32 @@ lookup <- panel |>
 nespareno <- setdiff(unique(panel$kod_obce), lookup$kod_obce)
 cat("Obci bez populace/admin. udaju (vyrazeno z mapy):", length(nespareno), "\n")
 
+narodni_soucet <- panel |> summarise(celkem_cr = sum(celkem, na.rm = TRUE), .by = cilovy_mesic)
+
+# prumerny vek obce/mesic - aproximace: kazde vekove kategorii z HUMPO dat
+# (cis_age_0_2/3_5/6_14/15_17/18_64/65_) je prirazen reprezentativni stred,
+# vazeny prumer pres poznane pocty. Volba stredu je zaznamenana v README
+# (zejmena 65+ je oteviena kategorie, 70 je odhad, ne empiricky zmereny
+# prumer teto skupiny).
+STRED_DO3 <- 1; STRED_3_6 <- 4; STRED_6_15 <- 10
+STRED_15_18 <- 16; STRED_18_65 <- 41; STRED_65_PLUS <- 70
+
 mesicni <- panel |>
   filter(kod_obce %in% lookup$kod_obce) |>
   inner_join(populace, by = "kod_obce") |>
-  mutate(koncentrace_pct = celkem / populace * 100) |>
-  transmute(cilovy_mesic = as.character(cilovy_mesic), kod_obce, celkem, koncentrace_pct, zdroj)
+  inner_join(narodni_soucet, by = "cilovy_mesic") |>
+  mutate(
+    koncentrace_pct = celkem / populace * 100,
+    podil_narodni_pct = celkem / celkem_cr * 100,
+    prumerny_vek = if_else(
+      celkem > 0,
+      (vek_do3 * STRED_DO3 + vek_3_6 * STRED_3_6 + vek_6_15 * STRED_6_15 +
+         vek_15_18 * STRED_15_18 + vek_18_65 * STRED_18_65 + vek_65_plus * STRED_65_PLUS) / celkem,
+      NA_real_
+    )
+  ) |>
+  transmute(cilovy_mesic = as.character(cilovy_mesic), kod_obce, celkem,
+            koncentrace_pct, podil_narodni_pct, prumerny_vek, zdroj)
 
 # narodni vekova struktura v case (0-17 / 18-64 / 65+) - hranice 17/18 podle
 # toho, jak jsou HUMPO vekove kategorie skutecne rozdelene

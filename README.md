@@ -142,17 +142,38 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
   věku (18–64) a seniorů (65+) na celkovém počtu uprchlíků v čase (hranice
   0–17 odpovídá tomu, jak jsou HUMPO věkové kategorie skutečně rozdělené:
   `cis_age_0_2/3_5/6_14/15_17` vs. `cis_age_18_64` vs. `cis_age_65_`).
-- **Žebříček 10 obcí** s nejvyšším absolutním počtem pro vybraný měsíc.
+- **Žebříček 10 obcí** s nejvyšším absolutním počtem pro vybraný měsíc, plus
+  podíl dané obce na celkovém počtu uprchlíků v ČR a průměrný věk uprchlíků
+  v té obci daný měsíc (viz "Průměrný věk" níže - jde o aproximaci).
 
 Zdroj dat a datum poslední aktualizace jsou vypsané přímo v postranním
 panelu appky.
 
-Mapa je statický `ggplot2` obrázek (ne interaktivní widget jako leaflet), ale
-podporuje **brush-to-zoom**: tažením myši přes mapu se vybere podoblast a
-graf se překreslí na tento výřez; dvojklik vrátí zobrazení na celou ČR. Není
-možné vidět okolní státy ani vyjet mimo republiku – brush vždy vybírá jen
-podmnožinu aktuálně zobrazené oblasti, která sama od začátku nikdy
-nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`).
+Mapa i všechny 3 časové grafy jsou statické `ggplot2` obrázky (ne interaktivní
+widgety jako leaflet/plotly), ale podporují **brush-to-zoom**: tažením myši
+se vybere podoblast/časové období a graf se překreslí na tento výřez; dvojklik
+vrátí na plné zobrazení. U mapy není možné vidět okolní státy ani vyjet mimo
+republiku – brush vždy vybírá jen podmnožinu aktuálně zobrazené oblasti, která
+sama od začátku nikdy nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v
+`app.R`). Všechny 4 grafy (mapa + 3 časové) mají také **hover tooltip** s
+konkrétní hodnotou pod kurzorem.
+
+### Průměrný věk (aproximace)
+Sloupec "Prům. věk" v žebříčku obcí je vážený průměr přes věkové kategorie,
+které HUMPO data skutečně obsahují (`cis_age_0_2/3_5/6_14/15_17/18_64/65_`),
+s těmito reprezentativními středy (viz `STRED_*` v `prepare_data.R`):
+
+| kategorie      | 0–2 | 3–5 | 6–14 | 15–17 | 18–64 | 65+ |
+|----------------|-----|-----|------|-------|-------|-----|
+| střed (roky)   | 1   | 4   | 10   | 16    | 41    | 70  |
+
+Středy 0–17 jsou prosté středy uzavřených intervalů (bez ambice o přesnost na
+měsíce). `18–64` má střed přesně uprostřed intervalu (41). `65+` je otevřená
+kategorie bez horní hranice - **70 je odhad, ne empiricky změřený průměr této
+skupiny** (u uprchlické populace lze čekat spíš mladší konec seniorského
+pásma vzhledem k fyzické náročnosti útěku, ale bez podrobnějších dat to nejde
+ověřit). Číslo v tabulce je tedy orientační aproximace, ne přesný demografický
+údaj.
 
 **Nasazení:** appka běží čistě v prohlížeči přes [shinylive](https://posit-dev.github.io/r-shinylive/)
 (R zkompilované do WebAssembly přes webR) – žádný live R server není potřeba.
@@ -247,3 +268,24 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
   tak skutečné "kolik % lidí v této skupině obcí jsou uprchlíci" resp.
   "jaký podíl všech uprchlíků v ČR na tuto skupinu připadá", správně váženo
   podle velikosti obce.
+- **Zoom + hover na časových grafech** (`registruj_graf()` v `app.R`, použito
+  3x): brush jen na ose X (`brushOpts(direction = "x")`), dvojklik resetuje.
+  `input$..._brush$xmin/xmax` mohou přijít jako holý `numeric` misto `Date`
+  (zavisi na tom, jak presne Shiny odvodi typ) - `coord_cartesian(xlim=...)`
+  na to padá s "`transform_date()` works with objects of class `<Date>`
+  only", pokud se to nejdriv neprevede přes `as.Date(x, origin =
+  "1970-01-01")` (na uz-Date objektu je to no-op, takze bezpecne v obou
+  pripadech).
+- **`shiny::nearPoints()` nefunguje spolehlivě ve webR/shinylive** - v
+  klasickém Shiny najde nejbližší bod hoveru bez problémů, ale ve
+  shinylive tiše nevracel žádnou shodu, přestože `input$..._hover`
+  (x/y/domain/range) přicházel se zcela rozumnými hodnotami - ověřeno
+  přímým čtením hover inputu na serveru. Řešení: `najdi_nejblizsi_bod()`
+  v `app.R` přepočítá vzdálenost ručně (stejná lineární transformace
+  data → pixely, jakou používá Shiny interně přes `hover$domain`/
+  `hover$range`) - stejný princip jako point-in-polygon test pro mapu.
+  Funguje spolehlivě v obou prostředích.
+- Testování zoomu/hoveru na časových grafech ve webR vyžaduje trpělivost -
+  reaktivní round-trip je citelně pomalejší než klasický Shiny; ověření
+  přes `Shiny.setInputValue()` (viz výše) občas potřebovalo druhý pokus
+  po delší prodlevě (~8-10 s), než se stav skutečně projevil.
