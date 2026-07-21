@@ -12,7 +12,9 @@
 # Mapa je staticky ggplot2 choropleth (ne leaflet) - zamerne: (a) nepotahuje
 # tim cely geoprostorovy R stack (sf/terra/sp/raster/s2), ktery leaflet
 # vyzaduje jen kvuli Imports, a (b) staticky obrazek nema zadny interaktivni
-# pan/zoom, takze se nikdy nejde podivat mimo pevne dany vyrez CR.
+# pan/zoom, takze se nikdy nejde podivat mimo pevne dany vyrez CR. Tooltip na
+# hover se resi rucne (bez plotly/leaflet) pres Shiny hoverOpts + bounding-box
+# predfiltr + point-in-polygon nad stejnymi lon/lat daty jako kresli mapu.
 
 library(shiny)
 library(dplyr)
@@ -35,15 +37,57 @@ posledni_zdroj <- panel |> filter(cilovy_mesic == max(cilovy_mesic)) |> pull(zdr
 posledni_label <- mesic_label[length(mesic_label)]
 datum_generovani <- format(Sys.Date(), "%d. %m. %Y")
 
-narodni_soucet <- panel |> group_by(cilovy_mesic) |> summarise(celkem_cr = sum(celkem), .groups = "drop")
-praha_kod <- lookup$kod_obce[lookup$obec == "Praha" & lookup$kraj == "Hlavní město Praha"][1]
-praha_trend <- panel |>
-  filter(kod_obce == praha_kod) |>
-  select(cilovy_mesic, celkem_praha = celkem) |>
-  inner_join(narodni_soucet, by = "cilovy_mesic") |>
-  mutate(podil = 100 * celkem_praha / celkem_cr,
-         datum = as.Date(cilovy_mesic)) |>
-  arrange(datum)
+# --- kategorie obci pro souhrnny trend graf ---------------------------------
+KOD_PRAHA <- "554782"
+KOD_BOP   <- c("582786", "554821", "554791")  # Brno, Ostrava, Plzen
+PORADI_KATEGORII <- c("Praha", "Brno, Ostrava, Plzeň", "Krajská města (50–120 tis.)",
+                       "Regionální centra (3–50 tis.)", "Malé obce (< 3 tis.)")
+
+lookup <- lookup |>
+  mutate(kategorie = case_when(
+    kod_obce == KOD_PRAHA ~ "Praha",
+    kod_obce %in% KOD_BOP ~ "Brno, Ostrava, Plzeň",
+    populace >= 50000     ~ "Krajská města (50–120 tis.)",
+    populace >= 3000      ~ "Regionální centra (3–50 tis.)",
+    TRUE                  ~ "Malé obce (< 3 tis.)"
+  ))
+
+kategorie_trend <- panel |>
+  inner_join(lookup |> select(kod_obce, populace, kategorie), by = "kod_obce") |>
+  summarise(koncentrace_kat = sum(celkem) / sum(populace) * 100, .by = c(cilovy_mesic, kategorie)) |>
+  mutate(datum = as.Date(cilovy_mesic),
+         kategorie = factor(kategorie, levels = PORADI_KATEGORII))
+
+# --- pomocna data pro hover tooltip (bbox predfiltr + point-in-polygon) -----
+bbox_tbl <- hranice |>
+  summarise(xmin = min(lon), xmax = max(lon), ymin = min(lat), ymax = max(lat),
+            .by = c(kod_obce, skupina))
+hranice_by_skupina <- split(hranice[, c("lon", "lat")], hranice$skupina)
+
+bod_v_polygonu <- function(px, py, xs, ys) {
+  n <- length(xs)
+  inside <- FALSE
+  j <- n
+  for (i in seq_len(n)) {
+    if (((ys[i] > py) != (ys[j] > py)) &&
+        (px < (xs[j] - xs[i]) * (py - ys[i]) / (ys[j] - ys[i]) + xs[i])) {
+      inside <- !inside
+    }
+    j <- i
+  }
+  inside
+}
+
+najdi_obec <- function(px, py) {
+  cand <- bbox_tbl[bbox_tbl$xmin <= px & bbox_tbl$xmax >= px &
+                    bbox_tbl$ymin <= py & bbox_tbl$ymax >= py, ]
+  if (nrow(cand) == 0) return(NA_character_)
+  for (i in seq_len(nrow(cand))) {
+    poly <- hranice_by_skupina[[cand$skupina[i]]]
+    if (bod_v_polygonu(px, py, poly$lon, poly$lat)) return(cand$kod_obce[i])
+  }
+  NA_character_
+}
 
 # CR bounding box + korekce pomeru stran (1 stupen zem. delky je na 49.8 s.s.
 # kratsi nez 1 stupen sirky) - staticka alternativa k mapove projekci bez sf
@@ -114,12 +158,14 @@ ui <- fluidPage(
     ),
     mainPanel(
       width = 9,
-      plotOutput("mapa", height = 560),
+      div(
+        style = "position: relative;",
+        plotOutput("mapa", height = 560,
+                   hover = hoverOpts("mapa_hover", delay = 100, delayType = "throttle", nullOutside = TRUE)),
+        uiOutput("mapa_tooltip")
+      ),
       tags$hr(),
-      fluidRow(
-        column(7, plotOutput("trend_praha", height = 260)),
-        column(5, plotOutput("bar_top", height = 260))
-      )
+      plotOutput("trend_kategorie", height = 320)
     )
   )
 )
@@ -168,34 +214,45 @@ server <- function(input, output, session) {
       theme(plot.title = element_text(hjust = 0.5, margin = margin(b = 10)))
   })
 
+  output$mapa_tooltip <- renderUI({
+    h <- input$mapa_hover
+    req(h)
+    kod <- najdi_obec(h$x, h$y)
+    if (is.na(kod)) return(NULL)
+    radek <- mesic_data() |> filter(kod_obce == kod)
+    if (nrow(radek) == 0 || is.na(radek$koncentrace_pct[1])) return(NULL)
+    css_x <- if (!is.null(h$coords_css)) h$coords_css$x else 20
+    css_y <- if (!is.null(h$coords_css)) h$coords_css$y else 20
+    div(
+      style = paste0(
+        "position:absolute; left:", css_x + 12, "px; top:", css_y + 12, "px; ",
+        "background:white; border:1px solid #999; border-radius:4px; ",
+        "padding:4px 10px; font-size:13px; box-shadow:0 1px 4px rgba(0,0,0,0.25); ",
+        "pointer-events:none; z-index:1000; white-space:nowrap;"
+      ),
+      tags$b(radek$obec[1]), tags$br(),
+      sprintf("Koncentrace: %.2f %%", radek$koncentrace_pct[1])
+    )
+  })
+
   output$top10 <- renderTable({
     mesic_data() |>
       slice_head(n = 10) |>
       transmute(Obec = obec, Počet = format(celkem, big.mark = " "))
   }, striped = TRUE, spacing = "xs")
 
-  output$trend_praha <- renderPlot({
+  output$trend_kategorie <- renderPlot({
     redraw()
-    ggplot(praha_trend, aes(datum, podil)) +
-      geom_line(color = "#b3251e", linewidth = 1) +
-      geom_point(color = "#b3251e") +
+    ggplot(kategorie_trend, aes(datum, koncentrace_kat, color = kategorie)) +
+      geom_line(linewidth = 1) +
       geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
                  linetype = "dashed", color = "grey40") +
       scale_y_continuous(labels = function(x) paste0(x, " %")) +
-      labs(title = "Podíl Prahy na celkovém počtu uprchlíků v ČR",
-           x = NULL, y = NULL) +
-      theme_minimal(base_size = 12)
-  })
-
-  output$bar_top <- renderPlot({
-    redraw()
-    d <- mesic_data() |> slice_head(n = 8) |> mutate(obec = factor(obec, levels = rev(obec)))
-    ggplot(d, aes(obec, celkem)) +
-      geom_col(fill = "#b3251e") +
-      coord_flip() +
-      labs(title = paste("Nejvíce uprchlíků (abs.) –", mesic_label[input$mesic_idx]),
-           x = NULL, y = NULL) +
-      theme_minimal(base_size = 12)
+      scale_color_brewer(palette = "Set1") +
+      labs(title = "Koncentrace uprchlíků podle typu obce v čase",
+           x = NULL, y = NULL, color = NULL) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "bottom")
   })
 }
 

@@ -128,11 +128,13 @@ za celé období 2022–2026 beze změny, ověřeno na vzorcích z 2022, 2023, 2
 ## Shiny appka (`shiny_app/`)
 Interaktivní vizualizace `humpo_obce_mesicni.csv`: choropleth mapa ČR (každá
 obec vybarvená podle koncentrace uprchlíků = `celkem / populace obce * 100`,
-ne podle absolutního počtu), slider pro výběr měsíce (2022-03 až aktuální,
-s popiskem "měsíc rok" místo číselného indexu), graf podílu Prahy na
-národním součtu v čase a žebříček 8 obcí s nejvyšším absolutním počtem pro
-vybraný měsíc. Zdroj dat a datum poslední aktualizace jsou vypsané přímo v
-postranním panelu appky.
+ne podle absolutního počtu) s tooltipem na hover (název obce + koncentrace
+pro vybraný měsíc), slider pro výběr měsíce (2022-03 až aktuální, s
+popiskem "měsíc rok" místo číselného indexu), graf koncentrace v čase podle
+5 kategorií obcí (Praha; Brno/Ostrava/Plzeň; krajská města 50–120 tis.;
+regionální centra 3–50 tis.; malé obce < 3 tis.) a žebříček 10 obcí s
+nejvyšším absolutním počtem pro vybraný měsíc. Zdroj dat a datum poslední
+aktualizace jsou vypsané přímo v postranním panelu appky.
 
 Mapa je statický `ggplot2` obrázek (ne interaktivní widget) – zobrazuje vždy
 pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`), takže není možné
@@ -180,15 +182,34 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
   vnitřní stav slideru a rozbilo Shiny vlastní vazbu na change event
   (zjištěno při implementaci: `update()` přegeneruje vnitřní `<span>`, takže
   i "bezpečný" pozorovatel musí sledovat celý wrapper, ne konkrétní uzel).
-- Hranice obcí (`shiny_app/data/obec_hranice.rds`) se stahují zvlášť přes
-  `R/fetch_obec_polygons.R` (ArcGIS `returnGeometry=true&outSR=4326` se
-  server-side generalizací `maxAllowableOffset=0.003`, cca 300 m – zjednoduší
-  Prahu z ~1189 na ~72 vrcholů) a commitují se do repozitáře jako hotový
+- Hranice obcí (`shiny_app/data/obec_hranice.rds`) se stahují a zjednodušují
+  přes `R/fetch_obec_polygons.R` a commitují se do repozitáře jako hotový
   soubor - hranice obcí se mění jen zřídka, není potřeba přegenerovávat při
-  každém běhu hlavního pipeline. Zjednodušení nerozlišuje díry/enklávy
-  (každý prstenec geometrie se kreslí jako samostatný polygon) – u českých
+  každém běhu hlavního pipeline. **Server-side generalizace ArcGIS
+  (`maxAllowableOffset`) byla zavrhnuta** - zjednodušuje každý polygon
+  nezávisle, takže mezi sousedícími obcemi vznikaly bílé mezery (jejich
+  společná hranice se po zjednodušení posunula jinak na každé straně).
+  Řešení: stáhne se plné rozlišení (1,34 mil. vrcholů, ~29 s) a zjednoduší
+  se topologicky přes `rmapshaper::ms_simplify(keep = 0.07, keep_shapes =
+  TRUE, sys = FALSE)` (V8 JS engine, ne systémový Node.js/mapshaper - žádná
+  externí závislost navíc), který sdílené vrcholy/hrany mezi sousedy
+  zachovává - výsledek je beze mezer (135 tis. vrcholů, 1,4 MB). `sf`/
+  `rmapshaper`/`sfheaders` se používají jen v tomto jednorázovém fetch
+  skriptu (spouští se lokálně/manuálně), ne v appce samotné ani v CI, takže
+  velikost nasazené appky neovlivňují. Zjednodušení nerozlišuje díry/
+  enklávy (každý prstenec geometrie je samostatný polygon) – u českých
   obcí jde o zanedbatelnou odchylku.
 - Populace pro obce s MOMC rozpadem (Praha, Brno, ...) se v
   `humpo_obce_latest.csv` nedá najít přímo (ten soubor má jen rozpad po
   městských částech) – `prepare_data.R` ji tam dopočítává součtem populace
   přes jednotlivé části.
+- **Tooltip na hover** se řeší bez plotly/leaflet (kvůli velikosti appky) -
+  `plotOutput` má nativní `hoverOpts`, který ze Shiny dostane pozici kurzoru
+  rovnou v datových souřadnicích (lon/lat), takže stačí bounding-box
+  předfiltr (`bbox_tbl`) + ruční point-in-polygon test (ray casting) nad
+  stejnými lon/lat daty, která kreslí mapu - žádná nová závislost. Pozice
+  tooltipu (CSS pixely) se bere z `input$mapa_hover$coords_css`.
+- Graf kategorií obcí agreguje koncentraci jako `sum(uprchlíci) /
+  sum(populace)` za celou kategorii a měsíc (ne průměr jednotlivých obecních
+  koncentrací) - dává tak skutečný "kolik % lidí v této skupině obcí jsou
+  uprchlíci", správně váženo podle velikosti obce.
