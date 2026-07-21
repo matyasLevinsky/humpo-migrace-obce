@@ -6,6 +6,7 @@ on:
     paths:
       - "shiny_app/**"
       - "data/processed/humpo_obce_mesicni.csv"
+      - "data/processed/humpo_obce_latest.csv"
       - ".github/workflows/deploy-shinylive.yml"
   workflow_dispatch:
 
@@ -36,7 +37,6 @@ jobs:
         with:
           packages: |
             any::shiny
-            any::leaflet
             any::dplyr
             any::ggplot2
             any::scales

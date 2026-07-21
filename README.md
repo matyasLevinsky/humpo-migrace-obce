@@ -126,18 +126,25 @@ za celé období 2022–2026 beze změny, ověřeno na vzorcích z 2022, 2023, 2
   souvislost s ročním cyklem prodlužování dočasné ochrany, ne chyba dat).
 
 ## Shiny appka (`shiny_app/`)
-Interaktivní vizualizace `humpo_obce_mesicni.csv`: mapa ČR (kruhové značky na
-centroidech obcí, velikost/barva podle počtu uprchlíků), slider pro výběr
-měsíce (2022-03 až aktuální), graf podílu Prahy na národním součtu v čase a
-žebříček 8 obcí s nejvyšším počtem pro vybraný měsíc. Zdroj dat a datum
-poslední aktualizace jsou vypsané přímo v postranním panelu appky.
+Interaktivní vizualizace `humpo_obce_mesicni.csv`: choropleth mapa ČR (každá
+obec vybarvená podle koncentrace uprchlíků = `celkem / populace obce * 100`,
+ne podle absolutního počtu), slider pro výběr měsíce (2022-03 až aktuální,
+s popiskem "měsíc rok" místo číselného indexu), graf podílu Prahy na
+národním součtu v čase a žebříček 8 obcí s nejvyšším absolutním počtem pro
+vybraný měsíc. Zdroj dat a datum poslední aktualizace jsou vypsané přímo v
+postranním panelu appky.
+
+Mapa je statický `ggplot2` obrázek (ne interaktivní widget) – zobrazuje vždy
+pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`), takže není možné
+přiblížit/oddálit ani odjet mimo území státu (žádný pan/zoom tam není vůbec
+k dispozici).
 
 **Nasazení:** appka běží čistě v prohlížeči přes [shinylive](https://posit-dev.github.io/r-shinylive/)
 (R zkompilované do WebAssembly přes webR) – žádný live R server není potřeba.
 `.github/workflows/deploy-shinylive.yml` appku při každé změně v `shiny_app/`
-nebo `data/processed/humpo_obce_mesicni.csv` sestaví a nasadí na GitHub Pages
-(zdrojový repozitář zůstává privátní, výsledná statická stránka na Pages je
-ale veřejně dostupná komukoliv s odkazem – GitHub Pages jinak nefunguje).
+nebo `data/processed/*.csv` sestaví a nasadí na GitHub Pages (zdrojový
+repozitář zůstává privátní, výsledná statická stránka na Pages je ale
+veřejně dostupná komukoliv s odkazem – GitHub Pages jinak nefunguje).
 
 **Lokální vývoj:**
 
@@ -150,25 +157,38 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
     Rscript serve_docs.R                  # obslouží docs/ na http://127.0.0.1:7862
 
 ### Na co si dát pozor (shinylive)
-- Balíčky pro webR (shiny, leaflet, dplyr, ggplot2, scales, readr, shinylive)
-  jsou dostupné jako předkompilované WASM binárky v `repo.r-wasm.org` –
-  ověřeno před implementací. Instalace balíčku ze zdrojáku ve webR možná
-  není, funguje jen to, co má hotovou WASM binárku.
-- `leaflet` má v Imports `sf`/`raster`, což do appky přitáhne celý
-  geoprostorový R stack (`sf`, `terra`, `sp`, `raster`, `s2`) – i když appka
-  žádný z nich přímo nepoužívá (jen `addCircleMarkers` na lon/lat). To je
-  hlavní důvod, proč exportovaná appka v `docs/` má přes 100 MB (z toho ~35 MB
-  je nutný základ webR/R runtime, ~62 MB balíčky, ~31 MB z toho je právě
-  nevyužitý geoprostorový stack). Pokud by velikost/rychlost načtení vadila,
-  jde nahradit leaflet mapu prostým ggplot2 bodovým grafem na stejných
-  centroidech – ušetřilo by to zhruba třetinu velikosti.
-- Prvotní vykreslení `renderPlot`/`leafletProxy` výstupů může ve webR (běží
-  citelně pomaleji než nativní R) selhat na "invalid width or height" resp.
-  "Couldn't find map with id ..." kvůli tomu, že kontejner v DOM ještě nemá
-  ustálenou velikost / widget ještě není na klientovi svázaný. Appka to řeší
-  vlastním mechanismem (`redraw()` v `app.R`) – několik vynucených překreslení
-  s rostoucím odstupem (500 ms až ~2,5 s) krátce po startu.
-- Centroidy obcí (`shiny_app/data/obec_centroids.csv`) se stahují zvlášť
-  přes `R/fetch_obec_centroids.R` (ArcGIS `returnCentroid=true&outSR=4326`) a
-  commitují se do repozitáře - hranice obcí se mění jen zřídka, není potřeba
-  přegenerovávat při každém běhu hlavního pipeline.
+- Balíčky pro webR (shiny, dplyr, ggplot2, scales, readr, shinylive) jsou
+  dostupné jako předkompilované WASM binárky v `repo.r-wasm.org` – ověřeno
+  před implementací. Instalace balíčku ze zdrojáku ve webR možná není,
+  funguje jen to, co má hotovou WASM binárku.
+- Mapa původně používala `leaflet`, který má v Imports `sf`/`raster` a do
+  appky tím přitahoval celý geoprostorový R stack (`sf`, `terra`, `sp`,
+  `raster`, `s2`, ~31 MB) i přesto, že appka žádný z nich přímo nepoužívala.
+  Přechodem na statický `ggplot2` choropleth (bez `sf` – hranice obcí se
+  kreslí přímo z prostých lon/lat vrcholů přes `geom_polygon`, ne přes `sf`
+  objekty) tahle závislost úplně odpadla, což zmenšilo `docs/` zhruba o
+  třetinu a zároveň (jako vedlejší efekt) vyřešilo požadavek na omezení
+  mapy jen na území ČR – statický obrázek nemá žádný pan/zoom.
+- Prvotní vykreslení `renderPlot` výstupů může ve webR (běží citelně
+  pomaleji než nativní R) selhat na "invalid width or height", protože
+  kontejner v DOM ještě nemá ustálenou velikost. Appka to řeší vlastním
+  mechanismem (`redraw()` v `app.R`) – několik vynucených překreslení s
+  rostoucím odstupem (500 ms až ~2,5 s) krátce po startu.
+- Popisek slideru (měsíc/rok místo čísla) se řeší čistě úpravou
+  zobrazovaného textu přes `MutationObserver` v injektovaném JS, NE voláním
+  `.data('ionRangeSlider').update({prettify: ...})` – to by resetovalo
+  vnitřní stav slideru a rozbilo Shiny vlastní vazbu na change event
+  (zjištěno při implementaci: `update()` přegeneruje vnitřní `<span>`, takže
+  i "bezpečný" pozorovatel musí sledovat celý wrapper, ne konkrétní uzel).
+- Hranice obcí (`shiny_app/data/obec_hranice.rds`) se stahují zvlášť přes
+  `R/fetch_obec_polygons.R` (ArcGIS `returnGeometry=true&outSR=4326` se
+  server-side generalizací `maxAllowableOffset=0.003`, cca 300 m – zjednoduší
+  Prahu z ~1189 na ~72 vrcholů) a commitují se do repozitáře jako hotový
+  soubor - hranice obcí se mění jen zřídka, není potřeba přegenerovávat při
+  každém běhu hlavního pipeline. Zjednodušení nerozlišuje díry/enklávy
+  (každý prstenec geometrie se kreslí jako samostatný polygon) – u českých
+  obcí jde o zanedbatelnou odchylku.
+- Populace pro obce s MOMC rozpadem (Praha, Brno, ...) se v
+  `humpo_obce_latest.csv` nedá najít přímo (ten soubor má jen rozpad po
+  městských částech) – `prepare_data.R` ji tam dopočítává součtem populace
+  přes jednotlivé části.
