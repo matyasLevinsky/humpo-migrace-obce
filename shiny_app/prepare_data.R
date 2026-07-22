@@ -47,6 +47,25 @@ lookup <- panel |>
 nespareno <- setdiff(unique(panel$kod_obce), lookup$kod_obce)
 cat("Obci bez populace/admin. udaju (vyrazeno z mapy):", length(nespareno), "\n")
 
+# MV archiv (viz R/fetch_historical_mv.R) zverejnoval jen obce s >=1 osobou
+# za dany mesic - obec, ktera v danem mesici nemela zadneho uprchlika, tak v
+# `panel` pro ten mesic nema VUBEC zadny radek (ne radek s NA). Bez opravy by
+# se to do mapy/agregatu promitlo jako chybejici (sede/NA) udaje mista
+# skutecne nuly - hlavne u starsich mesicu na zacatku valky, kdy vetsina
+# malych obci jeste zadneho uprchlika nemela. Doplnime proto explicitni
+# nulove radky pro VSECHNY kombinace mesic x obec (jen pro obce z `lookup`,
+# tedy ty se znamou populaci/admin. prislusnosti), aby mapa i kategoriove
+# agregaty (naprilad populacni jmenovatel v `kategorie_trend` v app.R) sedely
+# i pro obdobi, kdy velka cast obci mela fakticky nulu.
+mesic_zdroj <- panel |> distinct(cilovy_mesic, zdroj)
+kostra <- distinct(panel, cilovy_mesic) |> cross_join(distinct(lookup, kod_obce))
+
+panel <- kostra |>
+  left_join(panel |> select(-zdroj), by = c("cilovy_mesic", "kod_obce")) |>
+  left_join(mesic_zdroj, by = "cilovy_mesic") |>
+  mutate(across(c(celkem, vek_do3, vek_3_6, vek_6_15, vek_15_18, vek_18_65, vek_65_plus),
+                ~ replace(.x, is.na(.x), 0)))
+
 narodni_soucet <- panel |> summarise(celkem_cr = sum(celkem, na.rm = TRUE), .by = cilovy_mesic)
 
 # prumerny vek obce/mesic - aproximace: kazde vekove kategorii z HUMPO dat
@@ -58,7 +77,6 @@ STRED_DO3 <- 1; STRED_3_6 <- 4; STRED_6_15 <- 10
 STRED_15_18 <- 16; STRED_18_65 <- 41; STRED_65_PLUS <- 70
 
 mesicni <- panel |>
-  filter(kod_obce %in% lookup$kod_obce) |>
   inner_join(populace, by = "kod_obce") |>
   inner_join(narodni_soucet, by = "cilovy_mesic") |>
   mutate(

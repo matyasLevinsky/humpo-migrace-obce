@@ -74,7 +74,11 @@ kategorie_podil <- panel |>
          datum = as.Date(cilovy_mesic),
          kategorie = factor(kategorie, levels = PORADI_KATEGORII))
 
-BARVY_KATEGORII <- setNames(RColorBrewer::brewer.pal(5, "Set1"), PORADI_KATEGORII)
+# Barvy PAQ Research (paqresearch/paqr::paq_barvy_kat("normal"), viz
+# PAQ-Theme/PAQ_brand.md) - kategoricka paleta appky prevzata primo z
+# vizualni identity PAQ, aby appka barevne odpovidala PAQ vystupum.
+PAQ_KATEGORICKA <- c("#25357A", "#5E91FF", "#F5ABAB", "#40B884", "#F0D42E")
+BARVY_KATEGORII <- setNames(PAQ_KATEGORICKA, PORADI_KATEGORII)
 
 # --- vekova struktura v case (narodni agregat) ------------------------------
 celkem_mesic_vek <- vekova_struktura |> transmute(cilovy_mesic, celkem = deti + produktivni + seniori)
@@ -88,7 +92,9 @@ vekova_dlouhy <- bind_rows(
   mutate(podil_pct = pocet / celkem * 100,
          datum = as.Date(cilovy_mesic),
          skupina_veku = factor(skupina_veku, levels = PORADI_VEKU))
-BARVY_VEKU <- setNames(c("#377eb8", "#4daf4a", "#984ea3"), PORADI_VEKU)
+# blue/green/merlot z PAQ palety - stejny zdroj jako BARVY_KATEGORII, jen
+# jine 3 odstiny pro odliseni od grafu kategorii obci
+BARVY_VEKU <- setNames(c("#25357A", "#40B884", "#A31F48"), PORADI_VEKU)
 
 # --- pomocna data pro hover tooltip na mape (bbox predfiltr + point-in-polygon) --
 bbox_tbl <- hranice |>
@@ -126,6 +132,15 @@ najdi_obec <- function(px, py) {
 CR_XLIM <- c(12.0, 19.0)
 CR_YLIM <- c(48.5, 51.2)
 POMER_STRAN <- 1 / cos(49.8 * pi / 180)
+
+# sekvencni modra skala PAQ Research (paqr::paq_barvy_ord("blue"), viz
+# PAQ-Theme/PAQ_brand.md) - nahrazuje puvodni viridis/inferno, aby mapa
+# odpovidala barevne identite PAQ. Puvodne razeno tmava -> svetla, pro mapu
+# (nizka koncentrace = svetla, vysoka = tmava) je potreba obratit.
+PAQ_MODRA_SEKVENCNI <- rev(c(
+  "#25357A", "#2041A3", "#004AE7", "#3767FC", "#507DFE",
+  "#5D91FF", "#75A1FF", "#97B6FF", "#B5CCFF", "#D0E2FF", "#EAF3FF"
+))
 
 # Najde nejblizsi datum v datech k pozici kurzoru na ose X (hover$x je od
 # Shiny uz v datovych jednotkach - dny od 1970-01-01 - takze zadny prevod
@@ -166,11 +181,39 @@ zoom_chart_ui <- function(id, height) {
 }
 
 ui <- fluidPage(
-  tags$head(tags$style(HTML("
-    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
-    .zdroj-info { font-size: 12px; color: #666; margin-top: 10px; }
-    .graf-hint { font-size: 12px; color: #888; margin: 4px 0 10px 0; }
-    .graf-hint b { color: #555; }
+  tags$head(
+    # Vizualni identita PAQ Research (paqresearch/PAQ-Theme,
+    # paqresearch/paqr) - barvy podle PAQ_brand.md, font podle
+    # dokumentovaneho fallback retezce (Haffer je komercni font bez
+    # webove distribuce, proto Source Sans 3 / Source Serif 4 z Google
+    # Fonts - presne fallbacky uvedene v paq-typography.sty). Barvy grafu
+    # a mapy (ggplot2 PNG) jsou nastavene primo v R kodu nize - font se do
+    # statickych PNG grafu NEvkladal (vyzadovalo by to systemfonts/showtext
+    # jako dalsi WASM zavislost, coz by appku zbytecne zvetsilo).
+    tags$link(rel = "preconnect", href = "https://fonts.googleapis.com"),
+    tags$link(rel = "preconnect", href = "https://fonts.gstatic.com", crossorigin = "anonymous"),
+    tags$link(rel = "stylesheet", href = paste0(
+      "https://fonts.googleapis.com/css2?",
+      "family=Source+Sans+3:wght@400;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap"
+    )),
+    tags$style(HTML("
+    body { font-family: 'Source Serif 4', Georgia, serif; color: #001056; background: #ffffff; }
+    h1, h2, h3, h4, h5, .zdroj-info b {
+      font-family: 'Source Sans 3', -apple-system, Segoe UI, Roboto, sans-serif;
+      color: #001056;
+    }
+    a { color: #004ae7; }
+    .zdroj-info { font-size: 12px; color: #757581; margin-top: 10px; }
+    .graf-hint { font-size: 12px; color: #757581; margin: 4px 0 10px 0; }
+    .graf-hint b { color: #001056; }
+    table { font-family: 'Source Sans 3', sans-serif; }
+    table > thead > tr > th {
+      color: #001056; border-bottom: 2px solid #00cc74 !important;
+    }
+    .irs-bar, .irs-bar-edge, .irs-from, .irs-to, .irs-single { background: #004ae7 !important; border-color: #004ae7 !important; }
+    .irs-slider { border-color: #004ae7; background: #ffffff; }
+    .irs-line { background: #cfe2ff; }
+    .title-podbarveni { border-bottom: 3px solid #00cc74; padding-bottom: 12px; margin-bottom: 16px; }
   "))),
   tags$script(HTML(sprintf('
     (function() {
@@ -202,7 +245,8 @@ ui <- fluidPage(
       tryInit();
     })();
   ', mesic_label_js))),
-  titlePanel("Ukrajinská migrace v ČR: od plošného rozptýlení ke koncentraci ve městech"),
+  div(class = "title-podbarveni",
+      titlePanel("Ukrajinská migrace v ČR: od plošného rozptýlení ke koncentraci ve městech")),
   sidebarLayout(
     sidebarPanel(
       width = 3,
@@ -305,14 +349,14 @@ server <- function(input, output, session) {
     redraw()
     ggplot() +
       geom_polygon(data = mapa_data(), aes(lon, lat, group = skupina, fill = koncentrace_pct), color = NA) +
-      geom_polygon(data = orp_hranice, aes(lon, lat, group = skupina), fill = NA, color = "grey45", linewidth = 0.25) +
-      geom_polygon(data = kraj_hranice, aes(lon, lat, group = skupina), fill = NA, color = "grey10", linewidth = 0.7) +
+      geom_polygon(data = orp_hranice, aes(lon, lat, group = skupina), fill = NA, color = "#757581", linewidth = 0.25) +
+      geom_polygon(data = kraj_hranice, aes(lon, lat, group = skupina), fill = NA, color = "#001056", linewidth = 0.7) +
       coord_fixed(ratio = POMER_STRAN, xlim = mapa_rozsah$x, ylim = mapa_rozsah$y, expand = FALSE) +
-      scale_fill_viridis_c(name = "Koncentrace\nuprchlíků (%)", option = "inferno",
+      scale_fill_gradientn(name = "Koncentrace\nuprchlíků (%)", colours = PAQ_MODRA_SEKVENCNI,
                             limits = c(0, 10), oob = scales::squish, na.value = "grey85") +
       labs(title = paste("Koncentrace uprchlíků podle obcí –", mesic_label[input$mesic_idx])) +
       theme_void(base_size = 13) +
-      theme(plot.title = element_text(hjust = 0.5, margin = margin(b = 10)))
+      theme(plot.title = element_text(hjust = 0.5, margin = margin(b = 10), colour = "#001056", face = "bold"))
   })
 
   output$mapa_tooltip <- renderUI({
@@ -349,7 +393,7 @@ server <- function(input, output, session) {
       slice_head(n = 10) |>
       transmute(Obec = obec,
                 Počet = format(celkem, big.mark = " "),
-                `Podíl ČR` = sprintf("%.1f %%", podil_narodni_pct),
+                Koncentrace = sprintf("%.2f %%", koncentrace_pct),
                 `Prům. věk` = ifelse(is.na(prumerny_vek), "–", sprintf("%.0f", prumerny_vek)))
   }, striped = TRUE, spacing = "xs")
 
@@ -373,12 +417,15 @@ server <- function(input, output, session) {
       ggplot(data, aes(.data[[xvar]], .data[[yvar]], color = .data[[barva_var]])) +
         geom_line(linewidth = 1) +
         geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
-                   linetype = "dashed", color = "grey40") +
+                   linetype = "dashed", color = "#757581") +
         scale_y_continuous(labels = function(x) paste0(x, jednotka)) +
         scale_color_manual(values = paleta) +
         labs(title = nazev, x = NULL, y = NULL, color = NULL) +
         theme_minimal(base_size = 12) +
-        theme(legend.position = "bottom")
+        theme(legend.position = "bottom",
+              plot.title = element_text(colour = "#001056", face = "bold"),
+              panel.grid.major = element_line(colour = "#CDD1D9"),
+              panel.grid.minor = element_blank())
     })
 
     # najde nejblizsi datum k pozici kurzoru + jeho pixelovou pozici na ose X

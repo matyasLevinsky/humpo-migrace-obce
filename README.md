@@ -112,9 +112,35 @@ za celé období 2022–2026 beze změny, ověřeno na vzorcích z 2022, 2023, 2
   měsíci v datech chybí, což je potřeba interpretovat jako 0, ne jako NA.
   Živý HUMPO snapshot naopak obsahuje všech 6258 obcí explicitně (i s
   nulami) – proto poslední měsíc (2026-07) v panelu má výrazně víc řádků
-  (6258) než předchozí měsíce ze zdroje `mv_archiv`. Součty a průměry to
-  neovlivní, ale počítání "kolik obcí mělo uprchlíky" by bez tohoto vědomí
-  zavádělo.
+  (6258) než předchozí měsíce ze zdroje `mv_archiv`. `humpo_obce_mesicni.csv`
+  samotné (výstup `R/build_historical_dataset.R`) se **záměrně neopravuje**
+  – zůstává věrnou kopií toho, co MV/HUMPO skutečně publikovaly.
+  Chybějící řádky se na nuly doplňují až v `shiny_app/prepare_data.R` (viz
+  níže), který appce dodává data.
+- **Chybějící řádky ovlivňovaly appku víc, než se původně čekalo.** Prostý
+  národní součet (`sum(celkem)`) chybějícími řádky zkreslený není (chybějící
+  obec přispívá 0, ať už řádek existuje nebo ne). Poměrové ukazatele se
+  jmenovatelem počítaným jen z **přítomných** řádků ale ano – appka v
+  `app.R` počítala koncentraci pro skupiny obcí jako
+  `sum(uprchlíci skupiny) / sum(populace skupiny)`, kde `sum(populace)` se
+  bez opravy počítal jen přes obce, které v daném měsíci měly řádek (tj. měly
+  ≥1 uprchlíka) – u starších měsíců, kdy velká část malých obcí ještě
+  uprchlíky neměla, to jmenovatel uměle zmenšovalo a koncentraci pro
+  kategorii "Malé obce" nadhodnocovalo. Oprava (viz níže) tohle odstraňuje;
+  ověřeno, že po opravě je součet populace v kategorii konstantní napříč
+  všemi 53 měsíci (dřív se lišil měsíc od měsíce).
+- **Oprava (`shiny_app/prepare_data.R`):** po sestavení `lookup` (seznam obcí
+  se známou populací/admin. příslušností) se panel doplní na plný obdélník
+  měsíc × obec (`tidyr`-like cross join přes `dplyr::cross_join()` +
+  `left_join()`), a chybějící `celkem`/věkové sloupce se nahradí nulou;
+  sloupec `zdroj` se dopočítá podle měsíce (ne podle obce – zdroj je
+  atribut celého měsíce, ne jednotlivé obce). Výsledek:
+  `mesicni_panel.rds` má nově přesně `6258 obcí × 53 měsíců = 331 674` řádků
+  (dřív 230 066 – jen řádky, které se skutečně vyskytly v archivu). Zbylé
+  NA/`NaN` hodnoty koncentrace (4 obce × 53 měsíců = 212 řádků) patří
+  vojenským újezdům (Libavá, Boletice, Hradiště, Březina) s nulovou civilní
+  populací – tam je koncentrace matematicky nedefinovaná (0/0), ne chybějící
+  data, a mapa je správně zobrazuje jako šedé (`na.value`).
 - Populace obce (denominátor pro koncentraci) v historickém panelu není –
   MV XLSX populaci neobsahuje. Pro poměrové ukazatele je potřeba dopočítat
   proti aktuální populaci z `humpo_obce_latest.csv` (populace obcí se v
@@ -144,10 +170,12 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
   0–17 odpovídá tomu, jak jsou HUMPO věkové kategorie skutečně rozdělené:
   `cis_age_0_2/3_5/6_14/15_17` vs. `cis_age_18_64` vs. `cis_age_65_`).
 - **Dva žebříčky 10 obcí** pro vybraný měsíc – jeden podle nejvyššího
-  absolutního počtu, druhý podle nejvyšší relativní koncentrace – oba se
-  stejnými sloupci: počet, podíl dané obce na celkovém počtu uprchlíků v ČR
-  a průměrný věk uprchlíků v té obci (viz "Průměrný věk" níže - jde o
-  aproximaci).
+  absolutního počtu (sloupce: počet, podíl dané obce na celkovém počtu
+  uprchlíků v ČR, průměrný věk), druhý podle nejvyšší relativní koncentrace
+  (stejné sloupce, jen prostřední je přímo koncentrace_pct – tedy hodnota,
+  podle které je tabulka řazená – místo podílu na ČR, který by tu byl
+  duplicitní informací). Průměrný věk viz "Průměrný věk" níže - jde o
+  aproximaci.
 
 Zdroj dat a datum poslední aktualizace jsou vypsané přímo v postranním
 panelu appky.
@@ -180,6 +208,42 @@ skupiny** (u uprchlické populace lze čekat spíš mladší konec seniorského
 pásma vzhledem k fyzické náročnosti útěku, ale bez podrobnějších dat to nejde
 ověřit). Číslo v tabulce je tedy orientační aproximace, ne přesný demografický
 údaj.
+
+### Vizuální identita PAQ Research
+Appka přebírá barvy, škály a část UI stylu z oficiální vizuální identity PAQ
+Research – zdroj: privátní repozitáře `paqresearch/PAQ-Theme` (barvy, fonty,
+`PAQ_brand.md`) a `paqresearch/paqr` (R implementace – `theme_paq()`,
+`paq_barvy_kat()`, `paq_barvy_ord()` v `theme_paq.R`), oba v organizaci
+`paqresearch` na GitHubu.
+
+- **Kategorická paleta grafů** (5 kategorií obcí i barvy krajů/kategorií)
+  = `paqr::paq_barvy_kat("normal")[1:5]`:
+  `#25357A` (modrá), `#5E91FF` (světle modrá), `#F5ABAB` (růžová),
+  `#40B884` (zelená), `#F0D42E` (žlutá).
+- **Věková struktura** (3 skupiny) používá stejnou paletu, jiné 3 odstíny
+  pro odlišení od grafu kategorií: `#25357A` (modrá – děti), `#40B884`
+  (zelená – produktivní věk), `#A31F48` (merlot – senioři).
+- **Mapa** – sekvenční škála nahrazuje původní `viridis`/`inferno`:
+  11 odstínů modré z `paqr::paq_barvy_ord("blue")`, obráceně (světlá =
+  nízká koncentrace, tmavá `#25357A` = vysoká). Hranice krajů kreslené
+  `#001056` (night blue), ORP `#757581` (paq_grey).
+- **Mřížka grafů** `#CDD1D9`, **nadpisy grafů/mapy** `#001056` tučně – podle
+  utility barev zdokumentovaných v `PAQ_brand.md` (grid lines/caption text).
+- **UI appky** (mimo grafy): font `Source Sans 3` (nadpisy/tabulky/UI) a
+  `Source Serif 4` (běžný text) přes Google Fonts – to jsou přesně
+  zdokumentované webové fallbacky pro `Haffer`/`Source Serif 4` v
+  `paq-typography.sty` (Haffer je komerční font bez webové distribuce,
+  proto se nepoužívá přímo). Barva textu `#001056`, odkazy `#004ae7`,
+  záhlaví tabulek podtržené `#00cc74` (zelená) – odpovídá LaTeX schématu
+  `\colorschemWhite` v `paq-colors.sty` (bílé pozadí, night blue text,
+  zelené akcenty, modré odkazy).
+- **Font se NEaplikuje do samotných ggplot2 grafů/mapy** (ty zůstávají
+  systémovým sans/serif R grafického zařízení) – vložení `Source Sans
+  3`/`Source Serif 4` do staticky vykreslovaných PNG by ve webR vyžadovalo
+  balíček pro font rendering (`systemfonts`/`showtext` apod.), jehož
+  dostupnost jako WASM binárky nebyla ověřená, a riskovalo by to zbytečné
+  zvětšení appky – barvy (hlavní nositel vizuální identity v grafech) jsou
+  ale plně aplikované.
 
 **Nasazení:** appka běží čistě v prohlížeči přes [shinylive](https://posit-dev.github.io/r-shinylive/)
 (R zkompilované do WebAssembly přes webR) – žádný live R server není potřeba.
