@@ -82,6 +82,11 @@ mesicni <- panel |>
   mutate(
     koncentrace_pct = celkem / populace * 100,
     podil_narodni_pct = celkem / celkem_cr * 100,
+    # neproduktivni vek = deti/mladistvi (0-17) + seniori (65+), doplnek k
+    # produktivnimu veku (18-64) - drzi se jako souhrnny soucet (ne
+    # jednotlive vekove kategorie), pouzito pro graf podilu neproduktivniho
+    # veku podle kategorii obci v app.R
+    neproduktivni = vek_do3 + vek_3_6 + vek_6_15 + vek_15_18 + vek_65_plus,
     prumerny_vek = if_else(
       celkem > 0,
       (vek_do3 * STRED_DO3 + vek_3_6 * STRED_3_6 + vek_6_15 * STRED_6_15 +
@@ -90,7 +95,7 @@ mesicni <- panel |>
     )
   ) |>
   transmute(cilovy_mesic = as.character(cilovy_mesic), kod_obce, celkem,
-            koncentrace_pct, podil_narodni_pct, prumerny_vek, zdroj)
+            koncentrace_pct, podil_narodni_pct, neproduktivni, prumerny_vek, zdroj)
 
 # narodni vekova struktura v case (0-17 / 18-64 / 65+) - hranice 17/18 podle
 # toho, jak jsou HUMPO vekove kategorie skutecne rozdelene

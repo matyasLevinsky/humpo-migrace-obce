@@ -165,10 +165,15 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
   uprchlíků v ČR daný měsíc (součet přes všech 5 kategorií = 100 %).
   Kategorie: Praha; Brno/Ostrava/Plzeň; krajská města 50–120 tis.;
   regionální centra 3–50 tis.; malé obce < 3 tis.
-- **Graf věkové struktury** – podíl dětí a mladistvých (0–17), produktivního
-  věku (18–64) a seniorů (65+) na celkovém počtu uprchlíků v čase (hranice
-  0–17 odpovídá tomu, jak jsou HUMPO věkové kategorie skutečně rozdělené:
-  `cis_age_0_2/3_5/6_14/15_17` vs. `cis_age_18_64` vs. `cis_age_65_`).
+- **Dva grafy vedle sebe**: nalevo věková struktura – podíl dětí a mladistvých
+  (0–17), produktivního věku (18–64) a seniorů (65+) na celkovém počtu
+  uprchlíků v čase (hranice 0–17 odpovídá tomu, jak jsou HUMPO věkové
+  kategorie skutečně rozdělené: `cis_age_0_2/3_5/6_14/15_17` vs.
+  `cis_age_18_64` vs. `cis_age_65_`); napravo podíl uprchlíků v
+  **neproduktivním věku** (0–17 + 65+, doplněk k produktivnímu věku) podle
+  stejných 5 kategorií obcí jako u koncentrace/podílu výše – opět součty přes
+  obce v kategorii (`sum(neproduktivní) / sum(celkem)`), ne průměr
+  jednotlivých obecních podílů.
 - **Dva žebříčky 10 obcí** pro vybraný měsíc – jeden podle nejvyššího
   absolutního počtu (sloupce: počet, podíl dané obce na celkovém počtu
   uprchlíků v ČR, průměrný věk), druhý podle nejvyšší relativní koncentrace
@@ -180,17 +185,49 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
 Zdroj dat a datum poslední aktualizace jsou vypsané přímo v postranním
 panelu appky.
 
-Mapa i všechny 3 časové grafy jsou statické `ggplot2` obrázky (ne interaktivní
+Mapa i všechny 4 časové grafy jsou statické `ggplot2` obrázky (ne interaktivní
 widgety jako leaflet/plotly). **Zoom (brush-to-zoom) má jen mapa**: tažením
 myši se vybere podoblast a mapa se překreslí na tento výřez; dvojklik vrátí na
 plné zobrazení. Není možné vidět okolní státy ani vyjet mimo republiku – brush
 vždy vybírá jen podmnožinu aktuálně zobrazené oblasti, která sama od začátku
-nikdy nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`). Tři
-časové grafy zoom nemají (zkoušeno a zase odstraněno – přesné trefení tažením
-myši nepřidávalo hodnotu, hover popisovaný níže pokrývá stejnou potřebu líp).
-Všechny 4 grafy (mapa + 3 časové) mají **hover tooltip** s konkrétní hodnotou
-pod kurzorem – u časových grafů navíc svislou čáru a hodnoty všech kategorií
-pro dané datum najednou (viz níže).
+nikdy nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`). Časové
+grafy zoom nemají (zkoušeno a zase odstraněno – přesné trefení tažením myši
+nepřidávalo hodnotu, hover popisovaný níže pokrývá stejnou potřebu líp).
+Všech 5 grafů (mapa + 4 časové) má **hover tooltip** s konkrétní hodnotou pod
+kurzorem – u časových grafů navíc svislou čáru a hodnoty všech kategorií pro
+dané datum najednou (viz níže).
+
+### Hover tooltip a crosshair – opravené chyby
+- **Tooltip se automaticky flipne na levou stranu kurzoru**, pokud je kurzor
+  v pravé polovině grafu (`tooltip_flip()` v `app.R`, porovnává
+  `hov$coords_css$x` proti středu `hov$range`) – jinak by tooltip u pravé
+  poloviny grafu vyjížděl mimo graf/viewport. Flip využívá
+  `transform: translateX(-100%)` místo pevného odhadu šířky tooltipu na
+  serveru – prohlížeč posune div o jeho SKUTEČNOU vyrenderovanou šířku, takže
+  funguje správně bez ohledu na délku textu.
+- **z-index tooltipu/crosshairu zvednutý na 100000/99999** a přidané
+  `.shiny-plot-output.recalculating { opacity: 1 !important; }` – řeší
+  hlášený bug, kdy tooltip občas na chvíli zapadl pod sousední graf. Příčina:
+  Shiny při překreslování grafu dočasně ztlumí jeho opacitu (`.recalculating`
+  třída), a `opacity < 1` na elementu vytváří NOVÝ stacking context – to
+  mohlo krátkodobě změnit pořadí vykreslení vůči tooltipu sousedního grafu.
+  Vypnutí této opacity zároveň odstraňuje bliknutí grafu při každém
+  překreslení.
+- **Opravený reálný bug: crosshair byl systematicky víc vpravo než kurzor,
+  s chybou rostoucí doprava.** Původní výpočet pozice bral absolutní hranice
+  `hov$range`/`hov$domain` doslova a přepočítával z nich pixel přímo
+  (`r$left + (datum - d$left)/(d$right - d$left) * (r$right - r$left)`) –
+  klasický symptom škálovacího rozdílu mezi CSS pixely (ve kterých se
+  crosshair kreslí) a pixely podkladového PNG, když `range`/`domain` ve
+  skutečnosti odrážejí jednotky obrázku místo CSS (typicky při vyšším
+  devicePixelRatio). Oprava (`najdi_pozici()` v `app.R`) použije šířku
+  range/domain jen jako SKLON (převedený přes `hov$img_css_ratio` na CSS
+  pixely), ale jako KOTVU použije aktuální (vždy správnou) CSS pozici
+  kurzoru `hov$coords_css$x` spárovanou s jeho datovou pozicí `hov$x` –
+  crosshair tak sedí přesně pod kurzorem nezávisle na tom, jak daleko
+  vpravo/vlevo na grafu je. Ověřeno: rozdíl mezi pozicí kurzoru a crosshairu
+  zůstává v rámci pár pixelů (jen šum ze zaokrouhlení na nejbližší měsíc) při
+  20 %, 50 % i 85 % šířky grafu, bez systematického růstu.
 
 ### Průměrný věk (aproximace)
 Sloupec "Prům. věk" v žebříčku obcí je vážený průměr přes věkové kategorie,

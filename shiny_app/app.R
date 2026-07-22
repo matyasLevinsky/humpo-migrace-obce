@@ -74,6 +74,17 @@ kategorie_podil <- panel |>
          datum = as.Date(cilovy_mesic),
          kategorie = factor(kategorie, levels = PORADI_KATEGORII))
 
+# vpravo od narodniho vekoveho grafu: podil uprchliku v neproduktivnim veku
+# (0-17 + 65+) podle stejnych 5 kategorii obci jako u koncentrace/podilu -
+# soucty pres obce v kategorii, ne prumer jednotlivych obecnich hodnot
+kategorie_neprod <- panel |>
+  inner_join(lookup |> select(kod_obce, kategorie), by = "kod_obce") |>
+  summarise(neproduktivni_kat = sum(neproduktivni), celkem_kat = sum(celkem),
+            .by = c(cilovy_mesic, kategorie)) |>
+  mutate(podil_neprod_pct = neproduktivni_kat / celkem_kat * 100,
+         datum = as.Date(cilovy_mesic),
+         kategorie = factor(kategorie, levels = PORADI_KATEGORII))
+
 # Barvy PAQ Research (paqresearch/paqr::paq_barvy_kat("normal"), viz
 # PAQ-Theme/PAQ_brand.md) - kategoricka paleta appky prevzata primo z
 # vizualni identity PAQ, aby appka barevne odpovidala PAQ vystupum.
@@ -154,14 +165,34 @@ najdi_nejblizsi_datum <- function(xs, cil) {
   as.Date(nej, origin = "1970-01-01")
 }
 
-# vraci styl pro plovouci tooltip div, pozicovany podle kurzoru (CSS pixely)
-tooltip_style <- function(css_x, css_y) {
+# vraci styl pro plovouci tooltip div, pozicovany podle kurzoru (CSS pixely).
+# Kdyz je flip=TRUE (kurzor v prave polovine grafu), tooltip se vykresli
+# NALEVO od kurzoru misto napravo - `transform: translateX(-100%)` posune
+# div o jeho vlastni (skutecne vyrenderovanou) sirku, takze funguje spravne
+# bez ohledu na to, jak dlouhy text tooltip zrovna ma (nemusime odhadovat
+# sirku na serveru). z-index je zamerne velmi vysoke, aby tooltip nikdy
+# nezapadl pod sousedni graf (viz .recalculating override v CSS hlavicce -
+# spolecne resi obcasny stacking-context bug pri prekreslovani sousedniho
+# grafu).
+tooltip_style <- function(css_x, css_y, flip = FALSE) {
+  horizontal <- if (flip) {
+    paste0("left:", css_x - 12, "px; transform: translateX(-100%);")
+  } else {
+    paste0("left:", css_x + 12, "px;")
+  }
   paste0(
-    "position:absolute; left:", css_x + 12, "px; top:", css_y + 12, "px; ",
+    "position:absolute; ", horizontal, " top:", css_y + 12, "px; ",
     "background:white; border:1px solid #999; border-radius:4px; ",
     "padding:4px 10px; font-size:13px; box-shadow:0 1px 4px rgba(0,0,0,0.25); ",
-    "pointer-events:none; z-index:1000; white-space:nowrap;"
+    "pointer-events:none; z-index:100000; white-space:nowrap;"
   )
+}
+
+# rozhoduje, jestli je kurzor v prave polovine grafu (pak se tooltip flipne
+# nalevo) - pouziva stejny hov$range, jaky Shiny dava pro kazdy hover event
+tooltip_flip <- function(hov) {
+  !is.null(hov$range) && !is.null(hov$coords_css) &&
+    hov$coords_css$x > (hov$range$left + hov$range$right) / 2
 }
 
 # UI blok pro jeden hoverovatelny casovy graf (bez zoomu - jen mapa se
@@ -214,6 +245,12 @@ ui <- fluidPage(
     .irs-slider { border-color: #004ae7; background: #ffffff; }
     .irs-line { background: #cfe2ff; }
     .title-podbarveni { border-bottom: 3px solid #00cc74; padding-bottom: 12px; margin-bottom: 16px; }
+    /* Shiny ztlumuje opacitu grafu behem prekreslovani (.recalculating) -
+       opacity < 1 na ELEMENTU VYTVARI NOVY STACKING CONTEXT, coz obcas
+       zpusobilo, ze tooltip/crosshair sousedniho grafu na chvili zapadl
+       pod prave prekreslovany graf vedle. Vypnuti teto opacity odstranuje
+       i tenhle vedlejsi efekt (a navic appka behem prekreslovani nebliká). */
+    .shiny-plot-output.recalculating { opacity: 1 !important; }
   "))),
   tags$script(HTML(sprintf('
     (function() {
@@ -292,7 +329,10 @@ ui <- fluidPage(
         column(6, zoom_chart_ui("trend_podil", 300))
       ),
       tags$hr(),
-      zoom_chart_ui("trend_vek", 280)
+      fluidRow(
+        column(6, zoom_chart_ui("trend_vek", 280)),
+        column(6, zoom_chart_ui("trend_neprod", 280))
+      )
     )
   )
 )
@@ -369,7 +409,7 @@ server <- function(input, output, session) {
     css_x <- if (!is.null(h$coords_css)) h$coords_css$x else 20
     css_y <- if (!is.null(h$coords_css)) h$coords_css$y else 20
     div(
-      style = tooltip_style(css_x, css_y),
+      style = tooltip_style(css_x, css_y, flip = tooltip_flip(h)),
       tags$b(radek$obec[1]), tags$br(),
       sprintf("Kraj: %s", radek$kraj_nazev[1]), tags$br(),
       sprintf("ORP: %s", radek$orp_nazev[1]), tags$br(),
@@ -428,14 +468,29 @@ server <- function(input, output, session) {
               panel.grid.minor = element_blank())
     })
 
-    # najde nejblizsi datum k pozici kurzoru + jeho pixelovou pozici na ose X
-    # (stejna staticka transformace data -> pixely pres hover$domain/
-    # hover$range, jakou pouziva point-in-polygon tooltip u mapy).
+    # najde nejblizsi datum k pozici kurzoru + jeho pixelovou pozici na ose X.
+    #
+    # Puvodni verze pocitala px primo z absolutnich hov$range/hov$domain
+    # hranic (`r$left + (nej - d$left)/(d$right - d$left) * (r$right -
+    # r$left)`), coz vedlo k realnemu bugu: crosshair byl systematicky vic
+    # vpravo nez kurzor, s chybou rostouci doprava - klasicky prizna
+    # spatneho meritka mezi CSS pixely (`coords_css`, ve kterych se
+    # crosshair vykresluje) a pixely podkladoveho PNG (ktere `range`/`domain`
+    # občas odrazeji misto CSS pixelu, hlavne pri vyssim devicePixelRatio -
+    # `hov$img_css_ratio` existuje presne pro prevod mezi temito dvema
+    # soustavami). Oprava: mereni pouzije jen POMER sirky range/domain
+    # (prevedeny pres img_css_ratio na CSS pixely) jako sklon, ale jako KOTVU
+    # pouzije aktualni pozici kurzoru (hov$coords_css$x <-> hov$x), ktera je
+    # vzdy spravne v CSS pixelech - takze i kdyby byly absolutni hranice
+    # range$left/right v jinych jednotkach, vysledna pozice crosshairu sedi
+    # presne pod kurzorem nezavisle na tom, jak daleko vpravo/vlevo je.
     najdi_pozici <- function(hov) {
       nej <- najdi_nejblizsi_datum(data[[xvar]], hov$x)
       d <- hov$domain; r <- hov$range
-      if (is.null(d) || is.null(r)) return(NULL)
-      px <- r$left + (as.numeric(nej) - d$left) / (d$right - d$left) * (r$right - r$left)
+      if (is.null(d) || is.null(r) || is.null(hov$coords_css)) return(NULL)
+      pomer <- if (!is.null(hov$img_css_ratio)) hov$img_css_ratio$x else 1
+      css_na_jednotku <- (r$right - r$left) / (d$right - d$left) * pomer
+      px <- hov$coords_css$x + (as.numeric(nej) - hov$x) * css_na_jednotku
       list(nej = nej, px = px)
     }
 
@@ -445,7 +500,7 @@ server <- function(input, output, session) {
       poz <- najdi_pozici(hov)
       req(poz, poz$px)
       div(style = sprintf(
-        "position:absolute; left:%.1fpx; top:0; height:%dpx; width:0; border-left:1px dashed #666; pointer-events:none; z-index:900;",
+        "position:absolute; left:%.1fpx; top:0; height:%dpx; width:0; border-left:1px dashed #666; pointer-events:none; z-index:99999;",
         poz$px, height
       ))
     })
@@ -461,7 +516,7 @@ server <- function(input, output, session) {
       css_x <- if (!is.null(hov$coords_css)) hov$coords_css$x else 20
       css_y <- if (!is.null(hov$coords_css)) hov$coords_css$y else 20
       div(
-        style = tooltip_style(css_x, css_y),
+        style = tooltip_style(css_x, css_y, flip = tooltip_flip(hov)),
         tags$b(format(poz$nej, "%m/%Y")), tags$br(),
         lapply(seq_len(nrow(radky)), function(i) {
           tags$div(
@@ -482,6 +537,8 @@ server <- function(input, output, session) {
                  BARVY_KATEGORII, "Podíl na celkovém počtu uprchlíků v ČR", height = 300)
   registruj_graf("trend_vek", vekova_dlouhy, "datum", "podil_pct", "skupina_veku",
                  BARVY_VEKU, "Věková struktura uprchlíků v ČR v čase", height = 280)
+  registruj_graf("trend_neprod", kategorie_neprod, "datum", "podil_neprod_pct", "kategorie",
+                 BARVY_KATEGORII, "Podíl v neproduktivním věku (0–17 a 65+) podle kategorií obcí", height = 280)
 }
 
 shinyApp(ui, server)
