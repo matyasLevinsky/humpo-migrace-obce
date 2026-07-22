@@ -13,10 +13,11 @@
 #
 # Mapa i vsechny 3 casove grafy jsou staticke ggplot2 obrazky (ne
 # leaflet/plotly) - zamerne, aby appka nepotahovala tezke geoprostorove/JS
-# zavislosti. Zoom (mapa i grafy) je resen brush-to-zoom (Shiny brushOpts +
-# reaktivni xlim/ylim) a hover tooltipy rucnim point-in-polygon (mapa) resp.
-# shiny::nearPoints() (grafy) - zadna nova zavislost, zadny dopad na
-# velikost appky.
+# zavislosti. Zoom je jen u mapy, resen brush-to-zoom (Shiny brushOpts +
+# reaktivni xlim/ylim). Hover tooltipy: mapa pouziva rucni point-in-polygon,
+# 3 casove grafy pouzivaji primo hover$x (Shiny uz ho vraci v datovych
+# jednotkach) k dohledani nejblizsiho datumu a zobrazeni hodnot vsech
+# kategorii najednou - zadna nova zavislost, zadny dopad na velikost appky.
 
 library(shiny)
 library(dplyr)
@@ -126,29 +127,16 @@ CR_XLIM <- c(12.0, 19.0)
 CR_YLIM <- c(48.5, 51.2)
 POMER_STRAN <- 1 / cos(49.8 * pi / 180)
 
-#' Rucni ekvivalent shiny::nearPoints() pro hover na casovych grafech.
-#'
-#' Puvodne pouzity shiny::nearPoints() spolehlive fungoval v klasickem R,
-#' ale ve webR/shinylive tise nenachazel zadnou shodu, i kdyz hover udalost
-#' (x/y/domain/range) prichazela s naprosto rozumnymi hodnotami - overeno
-#' primym ctenim input$..._hover na serveru. Mista dohledavani presne
-#' priciny (pravdepodobne rozdil v tom, jak nearPoints interne zpracovava
-#' Date sloupce/mapping v teto sestave balicku) je rucni prepocet
-#' data -> pixely (stejnou linearni transformaci, jakou pouziva Shiny -
-#' viz hover$domain/hover$range) spolehlivejsi a snaz kontrolovatelny -
-#' stejny pristup uz pouzivame pro point-in-polygon test na mape.
-najdi_nejblizsi_bod <- function(data, xvar, yvar, hover, threshold_px = 15) {
-  prazdny <- data[0, ]
-  if (is.null(hover) || is.null(hover$domain) || is.null(hover$range) || is.null(hover$coords_css)) return(prazdny)
-  d <- hover$domain; r <- hover$range
-  x_data <- as.numeric(data[[xvar]])
-  y_data <- as.numeric(data[[yvar]])
-  px <- r$left + (x_data - d$left) / (d$right - d$left) * (r$right - r$left)
-  py <- r$bottom + (y_data - d$bottom) / (d$top - d$bottom) * (r$top - r$bottom)
-  vzdalenost <- sqrt((px - hover$coords_css$x)^2 + (py - hover$coords_css$y)^2)
-  i <- which.min(vzdalenost)
-  if (length(i) == 0 || vzdalenost[i] > threshold_px) return(prazdny)
-  data[i, ]
+# Najde nejblizsi datum v datech k pozici kurzoru na ose X (hover$x je od
+# Shiny uz v datovych jednotkach - dny od 1970-01-01 - takze zadny prevod
+# pres pixely neni potreba). Y pozice kurzoru se zamerne ignoruje - cilem je
+# ukazat hodnoty VSECH kategorii pro dany mesic, ne jen nejblizsi krivku.
+najdi_nejblizsi_datum <- function(xs, cil) {
+  if (is.null(cil)) return(NA)
+  xs_num <- as.numeric(xs)
+  uniq <- sort(unique(xs_num))
+  nej <- uniq[which.min(abs(uniq - as.numeric(cil)))]
+  as.Date(nej, origin = "1970-01-01")
 }
 
 # vraci styl pro plovouci tooltip div, pozicovany podle kurzoru (CSS pixely)
@@ -161,15 +149,18 @@ tooltip_style <- function(css_x, css_y) {
   )
 }
 
-# UI blok pro jeden zoomovatelny/hoverovatelny casovy graf - brush jen na ose
-# X (casova osa), dvojklik resetuje. Pouzito 3x (koncentrace/podil/vek).
+# UI blok pro jeden hoverovatelny casovy graf (bez zoomu - jen mapa se
+# zoomuje). Hover kdekoliv nad grafem ukazuje svislou caru + hodnoty vsech
+# kategorii pro dane datum. Pouzito 3x (koncentrace/podil/vek). Cara i
+# tooltip jsou samostatne pozicovane HTML divy NAD staticym PNG grafem -
+# schvalne se NEresi prekreslenim ggplot obrazku pri kazdem hoveru (viz
+# komentar u registruj_graf() nize, proc by to zpusobilo zpetnou vazbu).
 zoom_chart_ui <- function(id, height) {
   div(
     style = "position: relative;",
     plotOutput(id, height = height,
-               hover = hoverOpts(paste0(id, "_hover"), delay = 100, delayType = "throttle", nullOutside = TRUE),
-               brush = brushOpts(paste0(id, "_brush"), direction = "x", resetOnNew = TRUE),
-               dblclick = paste0(id, "_dblclick")),
+               hover = hoverOpts(paste0(id, "_hover"), delay = 60, delayType = "throttle", nullOutside = TRUE)),
+    uiOutput(paste0(id, "_crosshair")),
     uiOutput(paste0(id, "_tooltip"))
   )
 }
@@ -222,6 +213,10 @@ ui <- fluidPage(
       tags$hr(),
       h5("Top 10 obcí (absolutní počet)"),
       tableOutput("top10"),
+      tags$hr(),
+      h5("Top 10 obcí (relativní koncentrace)"),
+      tableOutput("top10_konc"),
+      tags$hr(),
       tags$div(
         class = "zdroj-info",
         tags$b("Zdroj dat:"), tags$br(),
@@ -247,7 +242,7 @@ ui <- fluidPage(
         uiOutput("mapa_tooltip")
       ),
       tags$hr(),
-      div(class = "graf-hint", "🔍 ", tags$b("Tip:"), " tažením podél osy X přiblížíte časové období u grafů níže, dvojklikem resetujete."),
+      div(class = "graf-hint", "📈 ", tags$b("Tip:"), " najetím myší kdekoliv nad grafem zobrazíte svislou čáru a hodnoty všech kategorií pro dané datum."),
       fluidRow(
         column(6, zoom_chart_ui("trend_koncentrace", 300)),
         column(6, zoom_chart_ui("trend_podil", 300))
@@ -334,7 +329,8 @@ server <- function(input, output, session) {
       tags$b(radek$obec[1]), tags$br(),
       sprintf("Kraj: %s", radek$kraj_nazev[1]), tags$br(),
       sprintf("ORP: %s", radek$orp_nazev[1]), tags$br(),
-      sprintf("Koncentrace: %.2f %%", radek$koncentrace_pct[1])
+      sprintf("Koncentrace: %.2f %%", radek$koncentrace_pct[1]), tags$br(),
+      sprintf("Počet uprchlíků: %s", format(radek$celkem[1], big.mark = " "))
     )
   })
 
@@ -347,28 +343,34 @@ server <- function(input, output, session) {
                 `Prům. věk` = ifelse(is.na(prumerny_vek), "–", sprintf("%.0f", prumerny_vek)))
   }, striped = TRUE, spacing = "xs")
 
-  # --- spolecna registrace zoom+hover pro jeden z casovych grafu (brush jen
-  # na ose X, dvojklik resetuje; hover pres shiny::nearPoints najde
-  # nejblizsi datovy bod mezi vsemi krivkami grafu).
-  registruj_graf <- function(id, data, xvar, yvar, barva_var, paleta, nazev, jednotka = " %") {
-    rozsah <- reactiveValues(x = NULL)
+  output$top10_konc <- renderTable({
+    mesic_data() |>
+      arrange(desc(koncentrace_pct)) |>
+      slice_head(n = 10) |>
+      transmute(Obec = obec,
+                Počet = format(celkem, big.mark = " "),
+                `Podíl ČR` = sprintf("%.1f %%", podil_narodni_pct),
+                `Prům. věk` = ifelse(is.na(prumerny_vek), "–", sprintf("%.0f", prumerny_vek)))
+  }, striped = TRUE, spacing = "xs")
 
-    observeEvent(input[[paste0(id, "_brush")]], {
-      b <- input[[paste0(id, "_brush")]]
-      # b$xmin/xmax muzou prijit jako holy numeric misto Date (zavisi na
-      # tom, jak presne Shiny odvodi typ z brush udalosti) - as.Date() na
-      # uz-Date objektu je no-op, takze tohle je bezpecne v obou pripadech.
-      # Bez toho coord_cartesian() padal na "transform_date() works with
-      # objects of class <Date> only".
-      rozsah$x <- as.Date(c(b$xmin, b$xmax), origin = "1970-01-01")
-    })
-    observeEvent(input[[paste0(id, "_dblclick")]], {
-      rozsah$x <- NULL
-    })
+  # --- spolecna registrace hover chovani pro jeden z casovych grafu (bez
+  # zoomu). Hover kdekoliv nad grafem (jakekoliv Y) najde nejblizsi datum na
+  # ose X a ukaze svislou caru + hodnoty vsech kategorii pro ten mesic naraz
+  # - snazsi trefit nez cilit na konkretni (treba nejnizsi) krivku.
+  #
+  # Cara i tooltip se kresli jako pozicovane HTML divy pres output$..._hover,
+  # NE jako soucast renderPlot() - kdyby renderPlot zavisel na hoveru,
+  # kazdy pohyb mysi by vyvolal prekresleni PNG (vymenu <img> elementu) a
+  # Shiny sam si po vymene elementu, na ktery je hover binding pripojeny,
+  # interne resetuje hover stav na null (overeno primym ctenim
+  # Shiny.shinyapp.$inputValues v prohlizeci - hodnota zmizela do ~200 ms
+  # po nastaveni). Timhle zpusobem (graf reaguje jen na redraw()/slider,
+  # hover jen na prekresleni HTML overlay) se teto zpetne vazbe predejde.
+  registruj_graf <- function(id, data, xvar, yvar, barva_var, paleta, nazev, height, jednotka = " %") {
 
     output[[id]] <- renderPlot({
       redraw()
-      p <- ggplot(data, aes(.data[[xvar]], .data[[yvar]], color = .data[[barva_var]])) +
+      ggplot(data, aes(.data[[xvar]], .data[[yvar]], color = .data[[barva_var]])) +
         geom_line(linewidth = 1) +
         geom_vline(xintercept = as.numeric(mesic_datum[input$mesic_idx]),
                    linetype = "dashed", color = "grey40") +
@@ -377,32 +379,62 @@ server <- function(input, output, session) {
         labs(title = nazev, x = NULL, y = NULL, color = NULL) +
         theme_minimal(base_size = 12) +
         theme(legend.position = "bottom")
-      if (!is.null(rozsah$x)) p <- p + coord_cartesian(xlim = rozsah$x)
-      p
+    })
+
+    # najde nejblizsi datum k pozici kurzoru + jeho pixelovou pozici na ose X
+    # (stejna staticka transformace data -> pixely pres hover$domain/
+    # hover$range, jakou pouziva point-in-polygon tooltip u mapy).
+    najdi_pozici <- function(hov) {
+      nej <- najdi_nejblizsi_datum(data[[xvar]], hov$x)
+      d <- hov$domain; r <- hov$range
+      if (is.null(d) || is.null(r)) return(NULL)
+      px <- r$left + (as.numeric(nej) - d$left) / (d$right - d$left) * (r$right - r$left)
+      list(nej = nej, px = px)
+    }
+
+    output[[paste0(id, "_crosshair")]] <- renderUI({
+      hov <- input[[paste0(id, "_hover")]]
+      req(hov, hov$x)
+      poz <- najdi_pozici(hov)
+      req(poz, poz$px)
+      div(style = sprintf(
+        "position:absolute; left:%.1fpx; top:0; height:%dpx; width:0; border-left:1px dashed #666; pointer-events:none; z-index:900;",
+        poz$px, height
+      ))
     })
 
     output[[paste0(id, "_tooltip")]] <- renderUI({
       hov <- input[[paste0(id, "_hover")]]
-      req(hov)
-      bod <- najdi_nejblizsi_bod(data, xvar, yvar, hov)
-      if (nrow(bod) == 0) return(NULL)
+      req(hov, hov$x)
+      poz <- najdi_pozici(hov)
+      req(poz)
+      radky <- data[data[[xvar]] == poz$nej, ]
+      radky <- radky[order(-radky[[yvar]]), ]
+      if (nrow(radky) == 0) return(NULL)
       css_x <- if (!is.null(hov$coords_css)) hov$coords_css$x else 20
       css_y <- if (!is.null(hov$coords_css)) hov$coords_css$y else 20
       div(
         style = tooltip_style(css_x, css_y),
-        tags$b(as.character(bod[[barva_var]][1])), tags$br(),
-        format(bod[[xvar]][1], "%m/%Y"), ": ",
-        sprintf("%.2f%s", bod[[yvar]][1], jednotka)
+        tags$b(format(poz$nej, "%m/%Y")), tags$br(),
+        lapply(seq_len(nrow(radky)), function(i) {
+          tags$div(
+            tags$span(style = sprintf(
+              "display:inline-block;width:9px;height:9px;border-radius:50%%;background:%s;margin-right:5px;",
+              paleta[[as.character(radky[[barva_var]][i])]]
+            )),
+            sprintf("%s: %.2f%s", as.character(radky[[barva_var]][i]), radky[[yvar]][i], jednotka)
+          )
+        })
       )
     })
   }
 
   registruj_graf("trend_koncentrace", kategorie_trend, "datum", "koncentrace_kat", "kategorie",
-                 BARVY_KATEGORII, "Koncentrace (uprchlíci / populace kategorie)")
+                 BARVY_KATEGORII, "Koncentrace (uprchlíci / populace kategorie)", height = 300)
   registruj_graf("trend_podil", kategorie_podil, "datum", "podil_pct", "kategorie",
-                 BARVY_KATEGORII, "Podíl na celkovém počtu uprchlíků v ČR")
+                 BARVY_KATEGORII, "Podíl na celkovém počtu uprchlíků v ČR", height = 300)
   registruj_graf("trend_vek", vekova_dlouhy, "datum", "podil_pct", "skupina_veku",
-                 BARVY_VEKU, "Věková struktura uprchlíků v ČR v čase")
+                 BARVY_VEKU, "Věková struktura uprchlíků v ČR v čase", height = 280)
 }
 
 shinyApp(ui, server)

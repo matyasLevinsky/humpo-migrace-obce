@@ -130,7 +130,8 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
 - **Choropleth mapa ČR** – každá obec vybarvená podle koncentrace uprchlíků
   (`celkem / populace obce * 100`, ne podle absolutního počtu), s hranicemi
   ORP a krajů překreslenými přes ni, tooltipem na hover (obec, kraj, ORP,
-  koncentrace pro vybraný měsíc) a brush-to-zoom (viz níže).
+  koncentrace i absolutní počet uprchlíků pro vybraný měsíc) a brush-to-zoom
+  (viz níže).
 - **Slider** pro výběr měsíce (2022-03 až aktuální) s popiskem "měsíc rok"
   místo číselného indexu.
 - **Dva grafy vedle sebe**: nalevo koncentrace (uprchlíci/populace) podle
@@ -142,21 +143,26 @@ Interaktivní vizualizace `humpo_obce_mesicni.csv`:
   věku (18–64) a seniorů (65+) na celkovém počtu uprchlíků v čase (hranice
   0–17 odpovídá tomu, jak jsou HUMPO věkové kategorie skutečně rozdělené:
   `cis_age_0_2/3_5/6_14/15_17` vs. `cis_age_18_64` vs. `cis_age_65_`).
-- **Žebříček 10 obcí** s nejvyšším absolutním počtem pro vybraný měsíc, plus
-  podíl dané obce na celkovém počtu uprchlíků v ČR a průměrný věk uprchlíků
-  v té obci daný měsíc (viz "Průměrný věk" níže - jde o aproximaci).
+- **Dva žebříčky 10 obcí** pro vybraný měsíc – jeden podle nejvyššího
+  absolutního počtu, druhý podle nejvyšší relativní koncentrace – oba se
+  stejnými sloupci: počet, podíl dané obce na celkovém počtu uprchlíků v ČR
+  a průměrný věk uprchlíků v té obci (viz "Průměrný věk" níže - jde o
+  aproximaci).
 
 Zdroj dat a datum poslední aktualizace jsou vypsané přímo v postranním
 panelu appky.
 
 Mapa i všechny 3 časové grafy jsou statické `ggplot2` obrázky (ne interaktivní
-widgety jako leaflet/plotly), ale podporují **brush-to-zoom**: tažením myši
-se vybere podoblast/časové období a graf se překreslí na tento výřez; dvojklik
-vrátí na plné zobrazení. U mapy není možné vidět okolní státy ani vyjet mimo
-republiku – brush vždy vybírá jen podmnožinu aktuálně zobrazené oblasti, která
-sama od začátku nikdy nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v
-`app.R`). Všechny 4 grafy (mapa + 3 časové) mají také **hover tooltip** s
-konkrétní hodnotou pod kurzorem.
+widgety jako leaflet/plotly). **Zoom (brush-to-zoom) má jen mapa**: tažením
+myši se vybere podoblast a mapa se překreslí na tento výřez; dvojklik vrátí na
+plné zobrazení. Není možné vidět okolní státy ani vyjet mimo republiku – brush
+vždy vybírá jen podmnožinu aktuálně zobrazené oblasti, která sama od začátku
+nikdy nepřesahuje pevně daný výřez ČR (`CR_XLIM`/`CR_YLIM` v `app.R`). Tři
+časové grafy zoom nemají (zkoušeno a zase odstraněno – přesné trefení tažením
+myši nepřidávalo hodnotu, hover popisovaný níže pokrývá stejnou potřebu líp).
+Všechny 4 grafy (mapa + 3 časové) mají **hover tooltip** s konkrétní hodnotou
+pod kurzorem – u časových grafů navíc svislou čáru a hodnoty všech kategorií
+pro dané datum najednou (viz níže).
 
 ### Průměrný věk (aproximace)
 Sloupec "Prům. věk" v žebříčku obcí je vážený průměr přes věkové kategorie,
@@ -268,24 +274,27 @@ Export do statické shinylive podoby (stejné, co dělá i CI):
   tak skutečné "kolik % lidí v této skupině obcí jsou uprchlíci" resp.
   "jaký podíl všech uprchlíků v ČR na tuto skupinu připadá", správně váženo
   podle velikosti obce.
-- **Zoom + hover na časových grafech** (`registruj_graf()` v `app.R`, použito
-  3x): brush jen na ose X (`brushOpts(direction = "x")`), dvojklik resetuje.
-  `input$..._brush$xmin/xmax` mohou přijít jako holý `numeric` misto `Date`
-  (zavisi na tom, jak presne Shiny odvodi typ) - `coord_cartesian(xlim=...)`
-  na to padá s "`transform_date()` works with objects of class `<Date>`
-  only", pokud se to nejdriv neprevede přes `as.Date(x, origin =
-  "1970-01-01")` (na uz-Date objektu je to no-op, takze bezpecne v obou
-  pripadech).
-- **`shiny::nearPoints()` nefunguje spolehlivě ve webR/shinylive** - v
-  klasickém Shiny najde nejbližší bod hoveru bez problémů, ale ve
-  shinylive tiše nevracel žádnou shodu, přestože `input$..._hover`
-  (x/y/domain/range) přicházel se zcela rozumnými hodnotami - ověřeno
-  přímým čtením hover inputu na serveru. Řešení: `najdi_nejblizsi_bod()`
-  v `app.R` přepočítá vzdálenost ručně (stejná lineární transformace
-  data → pixely, jakou používá Shiny interně přes `hover$domain`/
-  `hover$range`) - stejný princip jako point-in-polygon test pro mapu.
-  Funguje spolehlivě v obou prostředích.
-- Testování zoomu/hoveru na časových grafech ve webR vyžaduje trpělivost -
+- **Hover na časových grafech** (`registruj_graf()` v `app.R`, použito 3x):
+  žádný brush/zoom, jen `hoverOpts`. Původně měly tyto grafy i brush-to-zoom
+  a hover hledal jen nejbližší jednotlivý bod (podle X i Y pozice kurzoru
+  zároveň) – v praxi šlo těžko trefit konkrétní (hlavně nejnižší) křivku.
+  Zoom byl proto odstraněn a hover přepracován: hledá jen nejbližší **datum**
+  na ose X (Y pozice kurzoru se ignoruje úplně) a zobrazí svislou čáru u
+  tohoto data plus tooltip s hodnotami všech kategorií najednou – snazší
+  cílení, protože stačí trefit správný sloupec dat, ne konkrétní pixel na
+  konkrétní křivce.
+- **`shiny::nearPoints()` se v `app.R` nepoužívá** - v klasickém Shiny
+  funguje, ale ve shinylive/webR tiše nevracel žádnou shodu i při rozumných
+  hover datech (ověřeno přímým čtením `input$..._hover` na serveru). Součástí
+  přechodu na hledání "nejbližšího data" to přestalo být relevantní: `hover$x`
+  je od Shiny už v datových jednotkách (dny od 1970-01-01), takže
+  `najdi_nejblizsi_datum()` v `app.R` jen porovná `hover$x` s unikátními
+  daty ve sloupci a nepotřebuje žádný přepočet přes pixely/domain/range
+  (na rozdíl od dřívějšího `najdi_nejblizsi_bod()`, který takhle nahrazoval
+  `nearPoints()` pro hledání jednotlivého bodu - to bylo nahrazeno spolu se
+  zoomem, protože hledání podle data samo o sobě žádnou pixelovou vzdálenost
+  nepotřebuje).
+- Testování hoveru na časových grafech ve webR vyžaduje trpělivost -
   reaktivní round-trip je citelně pomalejší než klasický Shiny; ověření
   přes `Shiny.setInputValue()` (viz výše) občas potřebovalo druhý pokus
   po delší prodlevě (~8-10 s), než se stav skutečně projevil.
